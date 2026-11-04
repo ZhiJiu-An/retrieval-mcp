@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 GOLDEN_PATH = Path(__file__).parent / "golden.jsonl"
+#: 真实语料（SQLite 后端）用另一套评测集，两类语料的问题分布不可混用
+GOLDEN_TCM_PATH = Path(__file__).parent / "golden_tcm.jsonl"
 
 
 @dataclass(frozen=True)
@@ -203,8 +206,12 @@ class Report:
         }
 
 
+def golden_for(backend: str) -> Path:
+    return GOLDEN_TCM_PATH if backend == "sqlite" else GOLDEN_PATH
+
+
 def load_cases(path: Path | None = None) -> list[Case]:
-    target = path or GOLDEN_PATH
+    target = path or Path(os.getenv("RAG_EVAL_GOLDEN") or GOLDEN_PATH)
     cases: list[Case] = []
     for line in target.read_text(encoding="utf-8").splitlines():
         line = line.strip()

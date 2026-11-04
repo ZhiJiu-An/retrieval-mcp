@@ -23,7 +23,7 @@ for entry in (_ROOT / "src", _ROOT / "eval"):
         sys.path.insert(0, str(entry))
 
 from harness import load_cases  # noqa: E402
-from runner import default_service, evaluate, simulate_agent  # noqa: E402
+from runner import cases_for, default_service, evaluate, simulate_agent  # noqa: E402
 
 #: 与 eval/test_*.py 里的门禁保持一致 —— 这里是「人工看」，那里是「CI 拦」。
 GATE_RECALL = 0.90
@@ -38,10 +38,11 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--json", action="store_true", help="输出机器可读结果")
     parser.add_argument("--failures", action="store_true", help="打印失败用例明细")
+    parser.add_argument("--golden", type=Path, help="指定评测集（默认按后端自动选）")
     args = parser.parse_args()
 
     service = default_service()
-    cases = load_cases()
+    cases = load_cases(args.golden) if args.golden else cases_for(service)
 
     report = evaluate(service, cases, top_k=args.top_k)
     agent = simulate_agent(service, cases)

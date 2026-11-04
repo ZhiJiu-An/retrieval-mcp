@@ -56,10 +56,19 @@ class RerankSettings:
     """重排模型（OpenAI / Cohere / Jina 兼容的 `/rerank`）。"""
 
     enabled: bool = True
+    #: `openai`（Cohere/Jina 风格 /rerank）| `dashscope`（阿里百炼原生端点）
+    provider: str = "openai"
     base_url: str | None = None
     model: str = ""
     api_key: str | None = None
     timeout: float = 10.0
+    #: `confidence` 的分档阈值。必须与重排器量纲匹配（见 rerank.py）
+    confidence_high: float = 0.50
+    confidence_medium: float = 0.25
+
+    @property
+    def bands(self) -> tuple[float, float]:
+        return (self.confidence_high, self.confidence_medium)
 
     @property
     def remote(self) -> bool:
@@ -68,7 +77,7 @@ class RerankSettings:
     def describe(self) -> str:
         if not self.enabled:
             return "disabled"
-        return f"remote:{self.model}" if self.remote else "heuristic"
+        return f"{self.provider}:{self.model}" if self.remote else "heuristic"
 
 
 # ---------------------------------------------------------------- 主配置
@@ -116,10 +125,13 @@ class Settings:
             ),
             rerank=RerankSettings(
                 enabled=_bool_env("RAG_RERANK", True),
+                provider=os.getenv("RAG_RERANK_PROVIDER", "openai").strip().lower(),
                 base_url=_blank_to_none(os.getenv("RAG_RERANK_BASE_URL")),
                 model=os.getenv("RAG_RERANK_MODEL", "").strip(),
-                api_key=_blank_to_none(os.getenv("RAG_RERANK_API_KEY")),
+                api_key=_first_env("RAG_RERANK_API_KEY", "DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
                 timeout=_float_env("RAG_RERANK_TIMEOUT", 10.0),
+                confidence_high=_float_env("RAG_CONFIDENCE_HIGH", 0.50),
+                confidence_medium=_float_env("RAG_CONFIDENCE_MEDIUM", 0.25),
             ),
             chunk_size=_int_env("RAG_CHUNK_SIZE", 360),
             chunk_overlap=_int_env("RAG_CHUNK_OVERLAP", 48),
@@ -150,23 +162,41 @@ class Settings:
 #: 仓库根的 `.env`。它是 gitignore 的，用来放 key，不进版本库。
 DOTENV_PATH = _REPO_ROOT / ".env"
 _loaded_dotenv = False
+#: 启动时就已存在的真实环境变量 —— 任何文件都不许覆盖它们。
+_protected: set[str] | None = None
 
 
 def load_dotenv(path: Path | None = None) -> None:
-    """极简 `.env` 加载器：只填**尚未设置**的变量，不覆盖真实环境变量。
+    """分层加载配置：**根 `.env` 打底 → `RAG_ENV_FILE` 覆盖 → 真实环境变量最高**。
 
-    不引入 python-dotenv 依赖 —— 这个文件只需要支持 `KEY=VALUE` 与 `#` 注释。
+    为什么要分层：密钥放根 `.env`（一份），而「样例语料 / 真实语料」这类切换项
+    放 profile 文件（`config/tcm.env`）。只加载 profile 会丢掉密钥（实测踩过 401）；
+    反过来让 profile 覆盖真实环境变量又会让 `RAG_BACKEND=sqlite rag-mcp` 这种
+    显式命令行参数失效。所以三层优先级写死在这里。
+
+    不引入 python-dotenv 依赖 —— 只需要支持 `KEY=VALUE` 与 `#` 注释。
     """
     global _loaded_dotenv
     if _loaded_dotenv:
         return
     _loaded_dotenv = True
 
-    target = path or DOTENV_PATH
+    _apply_file(path or DOTENV_PATH, override=False)
+
+    profile = _path_or_none(os.getenv("RAG_ENV_FILE"))
+    if profile is not None and profile != (path or DOTENV_PATH):
+        _apply_file(profile, override=True)
+
+
+def _apply_file(path: Path, *, override: bool) -> None:
+    global _protected
     try:
-        text = target.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return
+
+    if _protected is None:
+        _protected = set(os.environ)
 
     for line in text.splitlines():
         stripped = line.strip()
@@ -175,7 +205,9 @@ def load_dotenv(path: Path | None = None) -> None:
         key, _, value = stripped.partition("=")
         key = key.strip()
         value = value.strip().strip("'\"")
-        if key and key not in os.environ:
+        if not key or key in _protected:
+            continue
+        if override or key not in os.environ:
             os.environ[key] = value
 
 

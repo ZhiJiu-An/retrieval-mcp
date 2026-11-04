@@ -1,0 +1,22 @@
+{"id": "t01", "query": "感冒的病因病机是什么", "principal": "staff", "expect_doc_ids": ["tcm-92c9b521"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t02", "query": "胸痹的主要病机", "principal": "staff", "expect_doc_ids": ["tcm-501fd469"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t03", "query": "肺胀的病理因素", "principal": "staff", "expect_doc_ids": ["tcm-92c9b521"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t04", "query": "咳嗽的分类与治法", "principal": "staff", "expect_doc_ids": ["tcm-92c9b521"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t05", "query": "心悸的辨证分型", "principal": "staff", "expect_doc_ids": ["tcm-501fd469"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t06", "query": "不寐的治疗原则", "principal": "staff", "expect_doc_ids": ["tcm-501fd469"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t07", "query": "呕吐的辨证要点", "principal": "staff", "expect_doc_ids": ["tcm-01d7c4f3"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t08", "query": "泄泻与痢疾如何鉴别", "principal": "staff", "expect_doc_ids": ["tcm-01d7c4f3"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t09", "query": "胃痛的常见证型", "principal": "staff", "expect_doc_ids": ["tcm-01d7c4f3", "tcm-4f9f9114"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t10", "query": "消渴的三多症状", "principal": "staff", "expect_doc_ids": ["tcm-2537746b"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t11", "query": "黄疸的辨证要点", "principal": "staff", "expect_doc_ids": ["tcm-4f9f9114"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t12", "query": "眩晕的治法有哪些", "principal": "staff", "expect_doc_ids": ["tcm-c3840c0d"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t13", "query": "中风先兆如何识别", "principal": "staff", "expect_doc_ids": ["tcm-c3840c0d"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t14", "query": "水肿的辨证要点", "principal": "staff", "expect_doc_ids": ["tcm-e185560e"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t15", "query": "腰痛的病因", "principal": "staff", "expect_doc_ids": ["tcm-62aa43f4"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "t16", "query": "风寒感冒吃什么药", "principal": "staff", "expect_doc_ids": ["tcm-92c9b521"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "t17", "query": "睡不着觉怎么办", "principal": "staff", "expect_doc_ids": ["tcm-501fd469"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "t18", "query": "血糖高中医怎么治", "principal": "staff", "expect_doc_ids": ["tcm-2537746b"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "n01", "query": "今天天气怎么样", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "n02", "query": "如何炒股票", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "n03", "query": "冰箱不制冷怎么修", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "n04", "query": "推荐一部好看的电影", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}

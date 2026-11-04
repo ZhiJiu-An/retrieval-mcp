@@ -263,7 +263,9 @@ class RetrievalService:
         chunks = [chunk for chunk, _ in fused]
 
         if self._reranker.enabled:
-            ranked = self._reranker.rerank(query, tokens, chunks)
+            # 只把融合后的前 recall_depth 个送去重排：
+            # 候选再多只是多花钱多等待，收益接近零（DESIGN §6.2 top50→8）
+            ranked = self._reranker.rerank(query, tokens, chunks[: self._limits.recall_depth])
         else:
             ranked = [(chunk, 0.0) for chunk in chunks]
 
@@ -284,15 +286,20 @@ class RetrievalService:
         fusion_scores = {chunk.chunk_id: score for chunk, score in fused}
         scored: list[_Scored] = []
         for chunk, lexical_score in ranked:
-            similarity = semantic.get(chunk.chunk_id)
-            if similarity is None:
+            if self._reranker.cross_encoder:
+                # cross-encoder 同时看到了问题和正文，它比「词法覆盖度 + 余弦」
+                # 任何组合都准。再用合议规则去压它，只会把正确答案一起压掉。
                 relevance = lexical_score
-            elif lexical_score > 0.0 and similarity > 0.0:
-                relevance = min(lexical_score, similarity)
-            elif similarity >= self._limits.dense_floor:
-                relevance = similarity
             else:
-                relevance = lexical_score
+                similarity = semantic.get(chunk.chunk_id)
+                if similarity is None:
+                    relevance = lexical_score
+                elif lexical_score > 0.0 and similarity > 0.0:
+                    relevance = min(lexical_score, similarity)
+                elif similarity >= self._limits.dense_floor:
+                    relevance = similarity
+                else:
+                    relevance = lexical_score
             if relevance < floor:
                 continue
             scored.append(
@@ -300,7 +307,11 @@ class RetrievalService:
                     chunk=chunk,
                     fusion=fusion_scores.get(chunk.chunk_id, 0.0),
                     rerank=relevance,
-                    confidence=confidence_of(relevance, enabled=self._reranker.enabled),
+                    confidence=confidence_of(
+                        relevance,
+                        enabled=self._reranker.enabled,
+                        bands=self._reranker.confidence_bands,
+                    ),
                 )
             )
         scored.sort(key=lambda item: item.rerank, reverse=True)

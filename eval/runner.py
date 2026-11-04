@@ -14,7 +14,7 @@ for entry in (_ROOT / "src", _ROOT / "eval"):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))
 
-from harness import Case, CaseResult, Report, load_cases  # noqa: E402
+from harness import Case, CaseResult, Report, golden_for, load_cases  # noqa: E402
 
 from rag_mcp.config import Settings  # noqa: E402
 from rag_mcp.errors import RagError  # noqa: E402
@@ -35,10 +35,18 @@ def principal(name: str) -> Principal:
     return PRINCIPALS[name]
 
 
+def cases_for(service, cases: list[Case] | None = None) -> list[Case]:
+    """评测集跟着后端走：SQLite = 真实语料，memory = 内置样例语料。"""
+    if cases is not None:
+        return cases
+    settings = Settings.from_env()
+    return load_cases(golden_for(settings.backend))
+
+
 def evaluate(service, cases: list[Case] | None = None, *, top_k: int = 10) -> Report:
     """跑一遍检索指标。"""
     report = Report()
-    for case in cases if cases is not None else load_cases():
+    for case in cases_for(service, cases):
         try:
             result = service.search(principal(case.principal), query=case.query, top_k=top_k)
         except RagError:
@@ -66,7 +74,7 @@ def simulate_agent(service, cases: list[Case] | None = None, *, top_k: int = 8) 
     主要就体现在这两个数上（DESIGN §13.1）。**
     """
     report = Report()
-    for case in cases if cases is not None else load_cases():
+    for case in cases_for(service, cases):
         actor = principal(case.principal)
         calls = 0
         chars = 0

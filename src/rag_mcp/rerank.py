@@ -26,9 +26,11 @@ from .errors import BACKEND_UNAVAILABLE, RagError
 #: 判定「两个词挨得够近」的字符距离。
 PROXIMITY_WINDOW = 40
 
-#: `confidence` 的分档阈值（DESIGN §16.5 标定后可能要调）。
-HIGH_THRESHOLD = 0.62
-MEDIUM_THRESHOLD = 0.35
+#: 启发式重排的分档阈值 —— 只用在小语料/无网络场景，量纲是覆盖率。
+HEURISTIC_BANDS = (0.62, 0.35)
+#: cross-encoder（gte-rerank-v2）在真实语料上实测标定：
+#: 无关问题 top1 ≤ 0.121，真实问题 0.197–0.861 → 分档落在 0.50 / 0.25。
+CROSS_ENCODER_BANDS = (0.50, 0.25)
 
 Ranked = list[tuple[Any, float]]
 
@@ -36,6 +38,14 @@ Ranked = list[tuple[Any, float]]
 class Reranker(Protocol):
     model_id: str
     enabled: bool
+    #: 是否是**真正的 cross-encoder**。
+    #: True → 它自己就能判断语义，相关性直接用它的分数；
+    #: False（启发式）→ 它只会数词，必须靠 service 做「词法+余弦合议」补正。
+    cross_encoder: bool
+    #: `(high, medium)` 两档阈值。**必须由重排器自己给出**：
+    #: 启发式的覆盖率分与 cross-encoder 的相关性分是两种量纲，
+    #: 用同一组阈值等于必然误判一类（DESIGN §18.2.3）。
+    confidence_bands: tuple[float, float]
 
     def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked: ...
 
@@ -47,6 +57,8 @@ class HeuristicReranker:
     """确定性重排。没有模型依赖，因此可以出现在启动路径上。"""
 
     enabled = True
+    cross_encoder = False
+    confidence_bands = HEURISTIC_BANDS
     model_id = "heuristic"
 
     def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
@@ -119,6 +131,7 @@ class OpenAICompatReranker:
     """`/rerank` 端点（Cohere / Jina / SiliconFlow / bge-reranker 服务化方案通用）。"""
 
     enabled = True
+    cross_encoder = True
 
     def __init__(
         self,
@@ -127,7 +140,9 @@ class OpenAICompatReranker:
         model: str,
         api_key: str | None = None,
         timeout: float = 10.0,
+        bands: tuple[float, float] = CROSS_ENCODER_BANDS,
     ) -> None:
+        self.confidence_bands = bands
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.model_id = f"remote:{model}"
@@ -178,6 +193,90 @@ class OpenAICompatReranker:
         return ranked
 
 
+class DashScopeReranker:
+    """阿里百炼的**原生** rerank 端点（不是 OpenAI 兼容路径）。
+
+    实测结论（DESIGN §18.2.4）：`/compatible-mode/v1/rerank` 与 `/reranks`
+    都是 404，只有下面这个原生路径可用；请求体形状也与 Cohere/Jina 不同。
+
+    好消息是它给出的分数**分离度远好于余弦相似度**：
+    正确答案 0.65，错的两个 0.13 / 0.006 —— 这让 confidence 的两档阈值
+    终于有了可靠的依据。
+    """
+
+    enabled = True
+    cross_encoder = True
+    PATH = "/api/v1/services/rerank/text-rerank/text-rerank"
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        timeout: float = 10.0,
+        batch_size: int = 50,
+        bands: tuple[float, float] = CROSS_ENCODER_BANDS,
+    ) -> None:
+        self.confidence_bands = bands
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.model_id = f"dashscope:{model}"
+        self._api_key = api_key
+        self._timeout = timeout
+        self._batch = batch_size
+
+    def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
+        if not candidates:
+            return []
+
+        ranked: Ranked = []
+        # 分批：单次请求的候选数有上限，且太大也会拉长延迟
+        for start in range(0, len(candidates), self._batch):
+            window = candidates[start : start + self._batch]
+            ranked.extend(self._one(query, window, offset=start))
+
+        ranked.sort(key=lambda pair: pair[1], reverse=True)
+        return ranked
+
+    def _one(self, query: str, candidates: Sequence[Any], *, offset: int) -> Ranked:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        try:
+            response = httpx.post(
+                f"{self.base_url}{self.PATH}",
+                headers=headers,
+                json={
+                    "model": self.model,
+                    "input": {
+                        "query": query,
+                        "documents": [chunk.text or "" for chunk in candidates],
+                    },
+                    "parameters": {"return_documents": False},
+                },
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            rows = response.json()["output"]["results"]
+        except Exception as exc:
+            raise RagError(
+                code=BACKEND_UNAVAILABLE,
+                message=f"重排模型不可用：{type(exc).__name__}",
+                hint="检查 RAG_RERANK_*，或设 RAG_RERANK=off 回退到启发式重排",
+                retryable=True,
+                detail={"reranker": self.model_id, "error": str(exc)[:200]},
+            ) from exc
+
+        picked: Ranked = []
+        for row in rows:
+            index = int(row["index"])
+            if 0 <= index < len(candidates):
+                picked.append((candidates[index], _squash(float(row["relevance_score"]))))
+        return picked
+
+
 def _squash(value: float) -> float:
     if value < 0.0 or value > 1.0:
         return 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, value))))
@@ -192,6 +291,8 @@ class DisabledReranker:
     编一个分数出来只是自欺（DESIGN A19）。"""
 
     enabled = False
+    cross_encoder = False
+    confidence_bands = HEURISTIC_BANDS
     model_id = "disabled"
 
     def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
@@ -202,21 +303,33 @@ def build_reranker(settings: RerankSettings) -> Reranker:
     if not settings.enabled:
         return DisabledReranker()
     if settings.remote:
+        if settings.provider == "dashscope":
+            return DashScopeReranker(
+                base_url=settings.base_url or "",
+                model=settings.model,
+                api_key=settings.api_key,
+                timeout=settings.timeout,
+                bands=settings.bands,
+            )
         return OpenAICompatReranker(
             base_url=settings.base_url or "",
             model=settings.model,
             api_key=settings.api_key,
             timeout=settings.timeout,
+            bands=settings.bands,
         )
     return HeuristicReranker()
 
 
-def confidence_of(score: float, *, enabled: bool) -> str:
+def confidence_of(
+    score: float, *, enabled: bool, bands: tuple[float, float] = HEURISTIC_BANDS
+) -> str:
     """把重排分数映射成离散档位。分数不对外暴露，档位对外暴露（DESIGN A19）。"""
     if not enabled:
         return "unknown"
-    if score >= HIGH_THRESHOLD:
+    high, medium = bands
+    if score >= high:
         return "high"
-    if score >= MEDIUM_THRESHOLD:
+    if score >= medium:
         return "medium"
     return "low"
