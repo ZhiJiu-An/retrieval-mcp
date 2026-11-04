@@ -10,7 +10,7 @@ v0 的 `RAG_MCP_TRANSPORT` 已删除：一条没有被启用、没有被测试�
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .budget import Limits
@@ -78,6 +78,9 @@ class RerankSettings:
 class Settings:
     data_path: Path = _DEFAULT_DATA
     registry_path: Path = _DEFAULT_REGISTRY
+    #: 后端选择：`memory`（内置样例语料）| `sqlite`（由 ingest 建出的 rag.db）
+    backend: str = "memory"
+    db_path: Path | None = None
     limits: Limits = field(default_factory=Limits)
     principal_id: str = "local-dev"
     principal_groups: tuple[str, ...] = ("all",)
@@ -97,6 +100,8 @@ class Settings:
         return cls(
             data_path=Path(os.getenv("RAG_DATA_PATH") or _DEFAULT_DATA),
             registry_path=Path(os.getenv("RAG_REGISTRY_PATH") or _DEFAULT_REGISTRY),
+            backend=os.getenv("RAG_BACKEND", "memory").strip().lower() or "memory",
+            db_path=_path_or_none(os.getenv("RAG_DB_PATH")),
             limits=Limits.from_env(),
             principal_id=os.getenv("RAG_PRINCIPAL_ID", "local-dev"),
             principal_groups=tuple(g.strip() for g in groups.split(",") if g.strip()),
@@ -119,6 +124,10 @@ class Settings:
             chunk_size=_int_env("RAG_CHUNK_SIZE", 360),
             chunk_overlap=_int_env("RAG_CHUNK_OVERLAP", 48),
         )
+
+    def with_backend(self, backend: str, db_path: Path | None) -> Settings:
+        """评测时切换到另一个索引，不改其余配置。"""
+        return replace(self, backend=backend, db_path=db_path)
 
     def with_principal(self, user_id: str, groups: tuple[str, ...], max_level: str) -> Settings:
         """测试与多身份验证用：换身份不改其它配置。"""
@@ -196,6 +205,11 @@ def _first_env(*names: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _path_or_none(value: str | None) -> Path | None:
+    """空字符串视为未配置，而不是「当前目录」。"""
+    return Path(value) if value and value.strip() else None
 
 
 def _blank_to_none(value: str | None) -> str | None:

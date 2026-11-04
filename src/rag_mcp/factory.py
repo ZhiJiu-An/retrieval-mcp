@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from .backends.memory import MemoryBackend
+from .backends.sqlite import SqliteBackend
 from .config import Settings
 from .embedding import HashingEmbedder, build_embedder
 from .errors import RagError
@@ -52,6 +53,16 @@ def build_service(settings: Settings | None = None) -> RetrievalService:
 
 
 def _build_backend(settings: Settings, embedder: object):
+    """按 `RAG_BACKEND` 选后端。换成生产库只需在这里加一个分支。"""
+    if settings.backend == "sqlite":
+        if settings.db_path is None:
+            raise RagError(
+                code="BAD_CONFIGURATION",
+                message="RAG_BACKEND=sqlite 但没有配置 RAG_DB_PATH",
+                hint="先用 python -m rag_mcp.ingest 建库，再把路径写进 RAG_DB_PATH",
+                retryable=False,
+            )
+        return SqliteBackend(settings.db_path, embedder=embedder)  # type: ignore[arg-type]
     return MemoryBackend(
         settings.data_path,
         embedder=embedder,  # type: ignore[arg-type]

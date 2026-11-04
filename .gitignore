@@ -9,3 +9,5 @@ build/
 dist/
 .env
 .cache/
+rag.db
+*.db
