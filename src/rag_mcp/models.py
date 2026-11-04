@@ -44,7 +44,7 @@ class RetrievalCapabilities(BaseModel):
     把这个事实回给 Agent 和运维，比让人去猜「为什么同义词搜不到」强得多（DESIGN §16.1）。
     """
 
-    retrieval_mode: Literal["lexical", "hybrid"]
+    retrieval_mode: Literal["lexical", "hybrid", "dense"]
     embedder: str
     reranker: str
     rerank_enabled: bool

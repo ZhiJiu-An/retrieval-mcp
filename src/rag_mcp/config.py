@@ -89,6 +89,9 @@ class Settings:
     registry_path: Path = _DEFAULT_REGISTRY
     #: 后端选择：`memory`（内置样例语料）| `sqlite`（由 ingest 建出的 rag.db）
     backend: str = "memory"
+    #: 检索模式：`auto`（有语义能力就 hybrid）| `hybrid` | `lexical` | `dense`
+    #: 这是**安全可调**的开关：它不改变分数含义，只决定用哪几路召回。
+    retrieval_mode: str = "auto"
     db_path: Path | None = None
     limits: Limits = field(default_factory=Limits)
     principal_id: str = "local-dev"
@@ -110,6 +113,7 @@ class Settings:
             data_path=Path(os.getenv("RAG_DATA_PATH") or _DEFAULT_DATA),
             registry_path=Path(os.getenv("RAG_REGISTRY_PATH") or _DEFAULT_REGISTRY),
             backend=os.getenv("RAG_BACKEND", "memory").strip().lower() or "memory",
+            retrieval_mode=os.getenv("RAG_RETRIEVAL_MODE", "auto").strip().lower() or "auto",
             db_path=_path_or_none(os.getenv("RAG_DB_PATH")),
             limits=Limits.from_env(),
             principal_id=os.getenv("RAG_PRINCIPAL_ID", "local-dev"),
@@ -136,6 +140,9 @@ class Settings:
             chunk_size=_int_env("RAG_CHUNK_SIZE", 360),
             chunk_overlap=_int_env("RAG_CHUNK_OVERLAP", 48),
         )
+
+    def with_retrieval_mode(self, mode: str) -> Settings:
+        return replace(self, retrieval_mode=mode)
 
     def with_backend(self, backend: str, db_path: Path | None) -> Settings:
         """评测时切换到另一个索引，不改其余配置。"""

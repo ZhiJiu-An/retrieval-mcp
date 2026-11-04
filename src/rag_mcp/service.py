@@ -92,6 +92,19 @@ class ConfigFingerprint:
 
 
 @dataclass(frozen=True)
+class Candidate:
+    """未经阈值过滤的候选，带三路原始分数。只用于标定与排障。"""
+
+    chunk_id: str
+    doc_id: str
+    section_path: str
+    lexical: float
+    dense: float | None
+    rerank: float | None
+    fusion: float
+
+
+@dataclass(frozen=True)
 class _Scored:
     chunk: ChunkRecord
     fusion: float
@@ -131,10 +144,31 @@ class RetrievalService:
     # ------------------------------------------------------------ 元信息
 
     @property
+    def resolved_mode(self) -> str:
+        """实际生效的检索模式。
+
+        配置只是**请求**，能不能给是另一回事：没有语义能力的向量桩
+        满足不了 `hybrid` / `dense`，只能降级到 `lexical`（DESIGN §16.1）。
+        """
+        want = self._settings.retrieval_mode
+        if want == "auto":
+            return "hybrid" if self._embedder.semantic else "lexical"
+        if want in ("hybrid", "dense") and not self._embedder.semantic:
+            return "lexical"
+        return want if want in ("hybrid", "lexical", "dense") else "lexical"
+
+    @property
+    def _use_dense(self) -> bool:
+        return self.resolved_mode in ("hybrid", "dense")
+
+    @property
+    def _use_lexical(self) -> bool:
+        return self.resolved_mode in ("hybrid", "lexical")
+
+    @property
     def capabilities(self) -> RetrievalCapabilities:
         return RetrievalCapabilities(
-            # 词法桩没有语义能力，如实降级为 lexical（DESIGN §16.1）
-            retrieval_mode="hybrid" if self._embedder.semantic else "lexical",
+            retrieval_mode=self.resolved_mode,  # type: ignore[arg-type]
             embedder=self._embedder.model_id,
             reranker=self._reranker.model_id,
             rerank_enabled=self._reranker.enabled,
@@ -169,7 +203,12 @@ class RetrievalService:
         )
         if self._degraded:
             note += f" 注意：向量模型不可用（{self._degraded}）。"
-        elif not self._embedder.remote:
+        elif self._settings.retrieval_mode not in ("auto", "hybrid", "lexical", "dense"):
+            note += (
+                f" 注意：RAG_RETRIEVAL_MODE={self._settings.retrieval_mode!r} "
+                "无法识别，已按 auto 处理。"
+            )
+        elif self.resolved_mode == "lexical" and not self._embedder.remote:
             note += (
                 " 注意：当前向量通道使用本地词法桩，检索模式为 lexical，"
                 "同义改写提问可能搜不到（配置 RAG_EMBEDDING_* 可切换到真实向量模型）。"
@@ -231,6 +270,37 @@ class RetrievalService:
         result.chars_returned = _payload_chars(result)
         return result
 
+    def _recall_channels(
+        self,
+        principal: Principal,
+        query: str,
+        tokens: list[str],
+        filter_query: Any,
+    ) -> tuple[list[tuple[ChunkRecord, float]], list[tuple[ChunkRecord, float]]]:
+        """两路召回的唯一入口（`_retrieve` 与 `raw_candidates` 共用，避免两套语义）。"""
+        if filter_query.impossible:
+            return [], []
+
+        query_vector: Sequence[float] | None = None
+        if self._use_dense and self._embedder.semantic:
+            # 只有真正具备语义能力的模型才走密集通道。词法桩的「向量」是哈希桶，
+            # 拿它召回只会产生碰撞噪声 —— 实测无关查询（zzzqqq）也能命中若干块。
+            query_vector = self._embedder.embed([query])[0]
+
+        # 纯语义模式下不把词送给词法通道，反之亦然。
+        # `RAG_RETRIEVAL_MODE` 是安全开关：它只改变「用哪几路」，不改变分数含义。
+        lexical, dense = self._backend.recall(
+            tokens=tokens if self._use_lexical else [],
+            query_vector=query_vector if self._use_dense else None,
+            filters=filter_query,
+            # 检索用「可见性」闸门（ACL + 废止状态）；按 id 取数只用 ACL，
+            # 这样废止文档搜不到但仍能按 id 查阅（policy.visibility_predicate）
+            allow=visibility_predicate(principal),
+            depth=self._limits.recall_depth,
+        )
+
+        return lexical, dense
+
     def _retrieve(
         self,
         principal: Principal,
@@ -242,21 +312,7 @@ class RetrievalService:
             # 取值不在值域内：约定是空结果，不是报错（MVP.md F2）
             return [], 0
 
-        query_vector: Sequence[float] | None = None
-        if self._embedder.semantic:
-            # 只有真正具备语义能力的模型才走密集通道。词法桩的「向量」是哈希桶，
-            # 拿它召回只会产生碰撞噪声 —— 实测无关查询（zzzqqq）也能命中若干块。
-            query_vector = self._embedder.embed([query])[0]
-
-        lexical, dense = self._backend.recall(
-            tokens=tokens,
-            query_vector=query_vector,
-            filters=filter_query,
-            # 检索用「可见性」闸门（ACL + 废止状态）；按 id 取数只用 ACL，
-            # 这样废止文档搜不到但仍能按 id 查阅（policy.visibility_predicate）
-            allow=visibility_predicate(principal),
-            depth=self._limits.recall_depth,
-        )
+        lexical, dense = self._recall_channels(principal, query, tokens, filter_query)
 
         # RRF 只用**排名**，对分数量纲免疫，所以只把排序后的块喂进去（fusion.py）
         fused = rrf([[chunk for chunk, _ in lexical], [chunk for chunk, _ in dense]])
@@ -316,6 +372,53 @@ class RetrievalService:
             )
         scored.sort(key=lambda item: item.rerank, reverse=True)
         return scored, len(scored)
+
+    def raw_candidates(
+        self,
+        principal: Principal,
+        *,
+        query: str,
+        limit: int = 50,
+        filters: dict[str, str | None] | None = None,
+    ) -> list[Candidate]:
+        """返回**未经阈值过滤**的候选及其三路分数。
+
+        用途：`calibrate` 标定阈值时需要一个没被阈值影响的原始分布；
+        排障时也需要知道「到底是哪一路没命中」。这不是给模型用的 API。
+        """
+        normalized = normalize(query or "")
+        if not normalized:
+            raise RagError(
+                code=EMPTY_QUERY, message="query 不能为空", hint="给出要检索的问题", retryable=True
+            )
+        filter_query = compile_filters(self._registry, filters or {})
+        tokens = unique(tokenize(normalized))
+
+        lexical, dense = self._recall_channels(principal, normalized, tokens, filter_query)
+        fused = rrf([[chunk for chunk, _ in lexical], [chunk for chunk, _ in dense]])
+        chunks = [chunk for chunk, _ in fused][:limit]
+
+        lexical_map = {chunk.chunk_id: score for chunk, score in lexical}
+        dense_map = {chunk.chunk_id: score for chunk, score in dense}
+        ranked = (
+            self._reranker.rerank(normalized, tokens, chunks)
+            if self._reranker.enabled
+            else [(chunk, None) for chunk in chunks]
+        )
+        return [
+            Candidate(
+                chunk_id=chunk.chunk_id,
+                doc_id=chunk.doc_id,
+                section_path=chunk.section_path,
+                lexical=round(lexical_map.get(chunk.chunk_id, 0.0), 4),
+                dense=(
+                    None if chunk.chunk_id not in dense_map else round(dense_map[chunk.chunk_id], 4)
+                ),
+                rerank=None if score is None else round(float(score), 4),
+                fusion=round(next((f for c, f in fused if c.chunk_id == chunk.chunk_id), 0.0), 6),
+            )
+            for chunk, score in ranked
+        ]
 
     def _apply_diversity(self, scored: list[_Scored], limit: int) -> list[_Scored]:
         """同一文档最多占 `per_doc_limit` 条。

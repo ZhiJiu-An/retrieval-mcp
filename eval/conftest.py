@@ -34,6 +34,12 @@ def service():
 
 
 @pytest.fixture(scope="session")
+def corpus_kind(service) -> str:
+    """当前跑的是哪套语料：`memory`（样例，含 confidential 文档）/ `sqlite`（真实）。"""
+    return service._settings.backend  # noqa: SLF001
+
+
+@pytest.fixture(scope="session")
 def report(service):
     return evaluate(service)
 
