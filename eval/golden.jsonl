@@ -1,0 +1,39 @@
+{"id": "d01", "query": "年假 天数", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "expect_section": "年假天数", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d02", "query": "累计工作满十年 年假几天", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "expect_section": "年假天数", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d03", "query": "年假申请 提前几个工作日", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "expect_section": "申请流程", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d04", "query": "未休年假 延期 次年", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "expect_section": "未休年假处理", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d05", "query": "离职 未休年假 300% 折算", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "d06", "query": "住宿标准 一线城市 每晚上限", "principal": "staff", "expect_doc_ids": ["fin-policy-travel"], "expect_section": "住宿标准", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d07", "query": "出差 高铁 一等座 条件", "principal": "staff", "expect_doc_ids": ["fin-policy-travel"], "expect_section": "交通标准", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d08", "query": "报销 时限 15 个工作日", "principal": "staff", "expect_doc_ids": ["fin-policy-travel"], "expect_section": "报销时限与材料", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d09", "query": "发票抬头 公司全称", "principal": "staff", "expect_doc_ids": ["fin-policy-travel"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "d10", "query": "网约车 100 元 起止地点", "principal": "staff", "expect_doc_ids": ["fin-policy-travel"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "d11", "query": "VPN 认证超时 系统时间", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "expect_section": "常见故障", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d12", "query": "VPN 账号 共享 锁定", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "expect_section": "安全要求", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d13", "query": "MFA 绑定 TOTP 硬件密钥", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "expect_section": "接入方式", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d14", "query": "入职材料 身份证 学历证书", "principal": "staff", "expect_doc_ids": ["hr-faq-onboarding"], "expect_section": "入职材料", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d15", "query": "试用期 3 个月 转正申请", "principal": "staff", "expect_doc_ids": ["hr-faq-onboarding"], "expect_section": "试用期与转正", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d16", "query": "社保 公积金 缴费基数 调整", "principal": "staff", "expect_doc_ids": ["hr-faq-onboarding"], "expect_section": "社保与公积金", "must_not_appear": [], "tags": ["direct"]}
+{"id": "d17", "query": "背景调查授权书 工牌 开通", "principal": "staff", "expect_doc_ids": ["hr-faq-onboarding"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "d18", "query": "VPN 频繁掉线 TCP 模式", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "must_not_appear": [], "tags": ["direct"]}
+{"id": "p01", "query": "带薪休假怎么申请", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "p02", "query": "年假没休完会不会作废", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "p03", "query": "出差住酒店能报多少钱", "principal": "staff", "expect_doc_ids": ["fin-policy-travel"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "p04", "query": "连不上公司内网怎么办", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "p05", "query": "新员工第一天要带什么材料", "principal": "staff", "expect_doc_ids": ["hr-faq-onboarding"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "p06", "query": "试用期多久能转成正式员工", "principal": "staff", "expect_doc_ids": ["hr-faq-onboarding"], "must_not_appear": [], "tags": ["paraphrase"]}
+{"id": "a01", "query": "VPN", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "must_not_appear": [], "tags": ["acronym"]}
+{"id": "a02", "query": "SSO 单点登录", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "must_not_appear": [], "tags": ["acronym"]}
+{"id": "a03", "query": "DLP 审计 个人网盘", "principal": "staff", "expect_doc_ids": ["eng-manual-vpn"], "must_not_appear": [], "tags": ["acronym"]}
+{"id": "a04", "query": "HRBP 备案", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "must_not_appear": [], "tags": ["acronym"]}
+{"id": "x01", "query": "直属主管 部门负责人 双重审批", "principal": "staff", "expect_doc_ids": ["hr-policy-leave", "fin-policy-travel"], "must_not_appear": [], "tags": ["cross_doc"]}
+{"id": "x02", "query": "次年 3 月 31 日 顺延", "principal": "staff", "expect_doc_ids": ["hr-policy-leave"], "must_not_appear": [], "tags": ["cross_doc"]}
+{"id": "n01", "query": "如何申请专利", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "n02", "query": "股票期权行权价格", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "n03", "query": "公司食堂几点开门", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "n04", "query": "办公室停车位怎么申请", "principal": "staff", "expect_doc_ids": [], "must_not_appear": [], "tags": ["no_answer"]}
+{"id": "s01", "query": "2026 年组织架构调整", "principal": "staff", "expect_doc_ids": [], "must_not_appear": ["hr-notice-org-2026"], "tags": ["denied"]}
+{"id": "s02", "query": "技术中心 拆分 基础架构部", "principal": "staff", "expect_doc_ids": [], "must_not_appear": ["hr-notice-org-2026"], "tags": ["denied"]}
+{"id": "s03", "query": "执委会 名单 附件", "principal": "staff", "expect_doc_ids": [], "must_not_appear": ["hr-notice-org-2026"], "tags": ["denied"]}
+{"id": "s04", "query": "2023 版住宿标准 450 元", "principal": "staff", "expect_doc_ids": [], "must_not_appear": ["fin-policy-travel-2023"], "tags": ["superseded"]}
+{"id": "s05", "query": "2026 年组织架构调整", "principal": "exec", "expect_doc_ids": ["hr-notice-org-2026"], "must_not_appear": [], "tags": ["denied"]}

@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "note": "可过滤字段词表。由入库侧（索引服务）产出，检索侧只做快照 + 消费，不在这里修改。见 DESIGN.md §9.4。",
+  "fields": [
+    {
+      "name": "department",
+      "type": "enum",
+      "values": ["hr", "finance", "engineering"],
+      "description": "文档所属部门"
+    },
+    {
+      "name": "doc_type",
+      "type": "enum",
+      "values": ["policy", "faq", "manual", "notice"],
+      "description": "文档类型"
+    },
+    {
+      "name": "updated_after",
+      "type": "date",
+      "description": "只保留该日期（含）之后更新的文档，格式 YYYY-MM-DD"
+    }
+  ]
+}

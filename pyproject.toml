@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-mcp"
+version = "0.2.0"
+description = "企业知识库只读检索 MCP server：list_sources / search / fetch（混合召回 + ACL + 评测门禁）"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp>=2.3,<3",
+  "pydantic>=2.7,<3",
+  "httpx>=0.27,<1",
+]
+
+[project.optional-dependencies]
+# 词级中文分词。不装也能跑（退化为 bigram），但中文检索噪声明显更大
+wordseg = ["jieba>=0.42"]
+dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
+
+[project.scripts]
+rag-mcp = "rag_mcp.server:main"
+rag-mcp-doctor = "rag_mcp.doctor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rag_mcp = ["data/*.json", "*.json"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# SIM905：停用词表用三引号字符串 + split 更好读，不改成列表字面量
+ignore = ["SIM905"]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest 必须在 import 业务模块之前改环境变量 / sys.path，
+# 否则开发者本地的 `.env` 会漏进测试（实测过：42 秒 + 网络抖动）
+"tests/conftest.py" = ["E402"]
+"eval/conftest.py" = ["E402"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "eval"]
+# eval 一起跑：安全门禁必须随 CI 阻断（DESIGN §13.3）
+testpaths = ["tests", "eval"]

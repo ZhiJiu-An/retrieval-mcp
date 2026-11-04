@@ -1,0 +1,222 @@
+"""重排：把「召回候选」变成「值得放进上下文的那 8 条」。
+
+设计依据：DESIGN.md §6.2（单点收益最大的一步）、A12、§16.2（本地 vs 托管 = 未决）。
+
+两档实现：
+
+- `HeuristicReranker`（默认）：不看模型，只用**查询词在小节标题与正文里的覆盖度**、
+  **短语是否原样出现**、**关键词邻近度**。它比 BM25 强的地方在于：BM25 只看词频，
+  它看「这几个词是不是同时命中在正确的位置上」。确定性、零依赖、毫秒级。
+- `OpenAICompatReranker`：配了端点就用它，覆盖式替换上面的启发式。
+
+两者都输出 **[0, 1] 的分数**，这个分数同时用于给 Agent 的 `confidence` 分档。
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Sequence
+from typing import Any, Protocol
+
+import httpx
+
+from .config import RerankSettings
+from .errors import BACKEND_UNAVAILABLE, RagError
+
+#: 判定「两个词挨得够近」的字符距离。
+PROXIMITY_WINDOW = 40
+
+#: `confidence` 的分档阈值（DESIGN §16.5 标定后可能要调）。
+HIGH_THRESHOLD = 0.62
+MEDIUM_THRESHOLD = 0.35
+
+Ranked = list[tuple[Any, float]]
+
+
+class Reranker(Protocol):
+    model_id: str
+    enabled: bool
+
+    def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked: ...
+
+
+# ---------------------------------------------------------------- 启发式
+
+
+class HeuristicReranker:
+    """确定性重排。没有模型依赖，因此可以出现在启动路径上。"""
+
+    enabled = True
+    model_id = "heuristic"
+
+    def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
+        if not candidates:
+            return []
+        # 覆盖率只在「本候选集里真的存在」的词上算。
+        # 查询里天然会有语料中不存在的词（口语词、泛词、分词噪声），
+        # 把它们放进分母会无差别压低所有候选，最后一起掉到相关性下限以下 ——
+        # 表现为「该召回的也没了」。
+        known = [term for term in terms if any(term in _haystack(c) for c in candidates)]
+        term_list = known or list(terms)
+        phrase = " ".join(term_list).strip()
+        scored = [(chunk, self._score(chunk, term_list, phrase, query)) for chunk in candidates]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored
+
+    def _score(self, chunk: Any, terms: list[str], phrase: str, query: str) -> float:
+        if not terms:
+            return 0.0
+
+        section = (chunk.section_path or "").lower()
+        body = (chunk.text or "").lower()
+        heading = (chunk.heading or "").lower()
+
+        section_hits = sum(1 for term in terms if term in section)
+        body_hits = sum(1 for term in terms if term in body)
+
+        # 小节标题命中比正文顺带提到值钱得多：模型是靠 section_path 判断「这节对不对」的。
+        section_cov = section_hits / len(terms)
+        body_cov = body_hits / len(terms)
+        coverage = 0.6 * section_cov + 0.4 * body_cov
+
+        bonus = 0.0
+        normalized_query = query.strip().lower()
+        if normalized_query and (normalized_query in body or normalized_query in section):
+            bonus += 0.18  # 整句原样出现
+        if phrase and phrase != normalized_query and phrase in body:
+            bonus += 0.06
+        if heading and any(term in heading for term in terms):
+            bonus += 0.08
+
+        # 关键词邻近度：两个词挨在一起共现，通常就是答案所在的那一句。
+        if len(terms) >= 2:
+            bonus += 0.08 * _proximity(section + "\n" + body, terms[0], terms[1])
+
+        return round(min(1.0, coverage + bonus), 4)
+
+
+def _haystack(chunk: Any) -> str:
+    """候选的可搜索文本：小节路径 + 正文。"""
+    return f"{chunk.section_path or ''}\n{chunk.text or ''}".lower()
+
+
+def _proximity(haystack: str, first: str, second: str) -> float:
+    """两个词最近共现的邻近度，`0..1`。相距超出窗口则 0。"""
+    pos_first = haystack.find(first)
+    pos_second = haystack.find(second)
+    if pos_first < 0 or pos_second < 0:
+        return 0.0
+    distance = abs(pos_first - pos_second)
+    if distance >= PROXIMITY_WINDOW:
+        return 0.0
+    return 1.0 - distance / PROXIMITY_WINDOW
+
+
+# ---------------------------------------------------------------- 远程
+
+
+class OpenAICompatReranker:
+    """`/rerank` 端点（Cohere / Jina / SiliconFlow / bge-reranker 服务化方案通用）。"""
+
+    enabled = True
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.model_id = f"remote:{model}"
+        self._api_key = api_key
+        self._timeout = timeout
+
+    def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
+        if not candidates:
+            return []
+
+        documents = [chunk.text or "" for chunk in candidates]
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        try:
+            response = httpx.post(
+                f"{self.base_url}/rerank",
+                headers=headers,
+                json={
+                    "model": self.model,
+                    "query": query,
+                    "documents": documents,
+                    "top_n": len(documents),
+                },
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            rows = response.json()["results"]
+        except Exception as exc:
+            raise RagError(
+                code=BACKEND_UNAVAILABLE,
+                message=f"重排模型不可用：{type(exc).__name__}",
+                hint="检查 RAG_RERANK_* 配置，或设 RAG_RERANK=off 回退到启发式重排",
+                retryable=True,
+                detail={"reranker": self.model_id, "error": str(exc)[:200]},
+            ) from exc
+
+        ranked: Ranked = []
+        for row in rows:
+            index = int(row["index"])
+            if not 0 <= index < len(candidates):
+                continue
+            # 不同厂商可能返回 logits，统一压到 [0, 1]：`confidence` 要能跨配置比较。
+            score = _squash(float(row.get("relevance_score", 0.0)))
+            ranked.append((candidates[index], score))
+        ranked.sort(key=lambda pair: pair[1], reverse=True)
+        return ranked
+
+
+def _squash(value: float) -> float:
+    if value < 0.0 or value > 1.0:
+        return 1.0 / (1.0 + math.exp(-max(-50.0, min(50.0, value))))
+    return value
+
+
+# ---------------------------------------------------------------- 工厂
+
+
+class DisabledReranker:
+    """显式关闭。此时 `confidence` 一律为 `unknown` —— 没有重排就没有判断依据，
+    编一个分数出来只是自欺（DESIGN A19）。"""
+
+    enabled = False
+    model_id = "disabled"
+
+    def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
+        return [(chunk, 0.0) for chunk in candidates]
+
+
+def build_reranker(settings: RerankSettings) -> Reranker:
+    if not settings.enabled:
+        return DisabledReranker()
+    if settings.remote:
+        return OpenAICompatReranker(
+            base_url=settings.base_url or "",
+            model=settings.model,
+            api_key=settings.api_key,
+            timeout=settings.timeout,
+        )
+    return HeuristicReranker()
+
+
+def confidence_of(score: float, *, enabled: bool) -> str:
+    """把重排分数映射成离散档位。分数不对外暴露，档位对外暴露（DESIGN A19）。"""
+    if not enabled:
+        return "unknown"
+    if score >= HIGH_THRESHOLD:
+        return "high"
+    if score >= MEDIUM_THRESHOLD:
+        return "medium"
+    return "low"
