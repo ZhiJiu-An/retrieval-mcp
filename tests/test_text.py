@@ -84,3 +84,15 @@ def test_clean_content_gets_no_warning():
     body = as_untrusted_block("年假 5 天", "年假制度 §天数")
 
     assert "warning" not in body
+
+
+def test_tokenize_keeps_mixed_script_terms():
+    """X线 / C反应蛋白 / 2型糖尿病 不能被切成只剩后半截。"""
+    for text, expected in (
+        ("X线", {"x", "线"}),
+        ("C反应蛋白", {"c", "反应", "蛋白"}),
+        ("2型糖尿病", {"2", "型", "糖尿病"}),
+        ("维生素C", {"维生素", "c"}),
+    ):
+        tokens = set(tokenize(text))
+        assert expected <= tokens, (text, tokens)

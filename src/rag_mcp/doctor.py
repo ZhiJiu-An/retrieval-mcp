@@ -65,14 +65,11 @@ def run(settings: Settings | None = None) -> HealthReport:
         vectors = embedder.embed([PROBE_TEXT])
         elapsed = (time.perf_counter() - started) * 1000
         report.embedder_ok = True
-        report.embedder_detail = (
-            f"dim={len(vectors[0])} latency={elapsed:.0f}ms"
-            + ("" if embedder.semantic else "（本地词法桩，无语义能力）")
+        report.embedder_detail = f"dim={len(vectors[0])} latency={elapsed:.0f}ms" + (
+            "" if embedder.semantic else "（本地词法桩，无语义能力）"
         )
         if not embedder.semantic:
-            report.notes.append(
-                "向量通道未启用语义召回：检索模式为 lexical，同义改写类问题会失败"
-            )
+            report.notes.append("向量通道未启用语义召回：检索模式为 lexical，同义改写类问题会失败")
     except RagError as exc:
         report.embedder_ok = False
         report.embedder_detail = f"{exc.code}: {exc.message}"
@@ -93,6 +90,8 @@ def run(settings: Settings | None = None) -> HealthReport:
         elapsed = (time.perf_counter() - started) * 1000
         report.reranker_ok = bool(ranked)
         report.reranker_detail = f"top1={ranked[0][0].section_path} latency={elapsed:.0f}ms"
+        if getattr(reranker, "degraded", False):
+            report.notes.append("远程重排不可用，已回退到启发式重排（本次进程内标记降级）")
         if not reranker.enabled:
             report.notes.append("重排被显式关闭（RAG_RERANK=off）：confidence 一律为 unknown")
     except RagError as exc:
@@ -122,11 +121,15 @@ def main() -> int:
     print("=" * 66)
     print("retrieval-mcp 自检")
     print("=" * 66)
-    print(f"语料         : {'OK' if report.data_ok else 'FAIL'}  "
-          f"({report.docs} 篇 / {report.chunks} 块, corpus_version={report.corpus_version})")
+    print(
+        f"语料         : {'OK' if report.data_ok else 'FAIL'}  "
+        f"({report.docs} 篇 / {report.chunks} 块, corpus_version={report.corpus_version})"
+    )
     print(f"词表         : schema_version={report.schema_version}")
-    print(f"分词器       : {report.segmenter}"
-          + ("" if report.segmenter == "word" else "（未装 jieba，退化为 bigram，中文噪声偏大）"))
+    print(
+        f"分词器       : {report.segmenter}"
+        + ("" if report.segmenter == "word" else "（未装 jieba，退化为 bigram，中文噪声偏大）")
+    )
     print(f"检索模式     : {report.retrieval_mode}")
     print(f"配置指纹     : {report.config_hash}")
     print(f"向量缓存     : {_cache_state()}")

@@ -84,10 +84,16 @@ class Hit(BaseModel):
 
 class SearchResult(BaseModel):
     query: str
+    #: 查询是否因 `max_query_chars` 被截断。截断后结果仍然有效，但 Agent
+    #: 应知道“我给的查询没有完整参与检索”。
+    query_truncated: bool = False
     hits: list[Hit]
     returned: int
     total: int
     truncated: bool
+    #: 截断原因：`top_k` 是总条数上限；`per_doc_limit` 是同文档多样性上限。
+    #: 两种情况给 Agent 的下一步动作不同，不能都提示“调大 top_k”。
+    truncated_reason: Literal["top_k", "per_doc_limit"] | None = None
     filters_applied: dict[str, str]
     corpus_version: str
     schema_version: str
@@ -110,6 +116,7 @@ class FetchResult(BaseModel):
     next_chunk_id: str | None = None
     resolved_by: ResolvedBy = "exact"
     updated_at: str
+    corpus_version: str = ""
     chars_returned: int
     hint: str | None = None
 

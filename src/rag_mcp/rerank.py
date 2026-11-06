@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Sequence
 from typing import Any, Protocol
@@ -22,6 +23,9 @@ import httpx
 
 from .config import RerankSettings
 from .errors import BACKEND_UNAVAILABLE, RagError
+from .http import post_json
+
+logger = logging.getLogger("rag_mcp.rerank")
 
 #: 判定「两个词挨得够近」的字符距离。
 PROXIMITY_WINDOW = 40
@@ -60,6 +64,11 @@ class HeuristicReranker:
     cross_encoder = False
     confidence_bands = HEURISTIC_BANDS
     model_id = "heuristic"
+
+    def __init__(self, *, bands: tuple[float, float] = HEURISTIC_BANDS) -> None:
+        # 以前 build_reranker 不传 bands，导致 calibrate 写出的
+        # RAG_CONFIDENCE_* 在默认启发式配置下完全不生效。
+        self.confidence_bands = bands
 
     def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
         if not candidates:
@@ -148,6 +157,10 @@ class OpenAICompatReranker:
         self.model_id = f"remote:{model}"
         self._api_key = api_key
         self._timeout = timeout
+        self._client = httpx.Client(timeout=timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
         if not candidates:
@@ -159,24 +172,23 @@ class OpenAICompatReranker:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
-            response = httpx.post(
+            response = post_json(
+                self._client,
                 f"{self.base_url}/rerank",
                 headers=headers,
-                json={
+                payload={
                     "model": self.model,
                     "query": query,
                     "documents": documents,
                     "top_n": len(documents),
                 },
-                timeout=self._timeout,
             )
-            response.raise_for_status()
             rows = response.json()["results"]
         except Exception as exc:
             raise RagError(
                 code=BACKEND_UNAVAILABLE,
                 message=f"重排模型不可用：{type(exc).__name__}",
-                hint="检查 RAG_RERANK_* 配置，或设 RAG_RERANK=off 回退到启发式重排",
+                hint="检查 RAG_RERANK_* 配置，或设 RAG_RERANK_PROVIDER=heuristic 强制本地重排",
                 retryable=True,
                 detail={"reranker": self.model_id, "error": str(exc)[:200]},
             ) from exc
@@ -225,6 +237,10 @@ class DashScopeReranker:
         self._api_key = api_key
         self._timeout = timeout
         self._batch = batch_size
+        self._client = httpx.Client(timeout=timeout)
+
+    def close(self) -> None:
+        self._client.close()
 
     def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
         if not candidates:
@@ -245,10 +261,11 @@ class DashScopeReranker:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         try:
-            response = httpx.post(
+            response = post_json(
+                self._client,
                 f"{self.base_url}{self.PATH}",
                 headers=headers,
-                json={
+                payload={
                     "model": self.model,
                     "input": {
                         "query": query,
@@ -256,15 +273,13 @@ class DashScopeReranker:
                     },
                     "parameters": {"return_documents": False},
                 },
-                timeout=self._timeout,
             )
-            response.raise_for_status()
             rows = response.json()["output"]["results"]
         except Exception as exc:
             raise RagError(
                 code=BACKEND_UNAVAILABLE,
                 message=f"重排模型不可用：{type(exc).__name__}",
-                hint="检查 RAG_RERANK_*，或设 RAG_RERANK=off 回退到启发式重排",
+                hint="检查 RAG_RERANK_*，或设 RAG_RERANK_PROVIDER=heuristic 强制本地重排",
                 retryable=True,
                 detail={"reranker": self.model_id, "error": str(exc)[:200]},
             ) from exc
@@ -299,26 +314,69 @@ class DisabledReranker:
         return [(chunk, 0.0) for chunk in candidates]
 
 
+class FallbackReranker:
+    """远程重排失败时回退到启发式，而不是让整个 search 失败。
+
+    注意：回退后的分数仍是启发式覆盖率，和 cross-encoder 不是同一量纲；
+    因此这里保留 primary 的 `cross_encoder` / bands 语义，并在日志/`degraded`
+    中明确标注本次实例已降级。生产环境应把重排失败告警接到监控。
+    """
+
+    def __init__(self, primary: Reranker, fallback: HeuristicReranker) -> None:
+        self._primary = primary
+        self._fallback = fallback
+        self.model_id = primary.model_id
+        self.enabled = primary.enabled
+        self.cross_encoder = primary.cross_encoder
+        self.confidence_bands = primary.confidence_bands
+        self.degraded = False
+
+    def close(self) -> None:
+        for component in (self._primary, self._fallback):
+            close = getattr(component, "close", None)
+            if callable(close):
+                close()
+
+    def rerank(self, query: str, terms: Sequence[str], candidates: Sequence[Any]) -> Ranked:
+        if not self.degraded:
+            try:
+                return self._primary.rerank(query, terms, candidates)
+            except RagError as exc:
+                self.degraded = True
+                logger.warning(
+                    "reranker unavailable, fallback to heuristic: %s: %s",
+                    exc.code,
+                    exc.message,
+                )
+        return self._fallback.rerank(query, terms, candidates)
+
+
 def build_reranker(settings: RerankSettings) -> Reranker:
     if not settings.enabled:
         return DisabledReranker()
+
+    heuristic = HeuristicReranker(bands=settings.bands)
+    if settings.provider == "heuristic":
+        return heuristic
     if settings.remote:
         if settings.provider == "dashscope":
-            return DashScopeReranker(
+            primary: Reranker = DashScopeReranker(
                 base_url=settings.base_url or "",
                 model=settings.model,
                 api_key=settings.api_key,
                 timeout=settings.timeout,
                 bands=settings.bands,
             )
-        return OpenAICompatReranker(
-            base_url=settings.base_url or "",
-            model=settings.model,
-            api_key=settings.api_key,
-            timeout=settings.timeout,
-            bands=settings.bands,
-        )
-    return HeuristicReranker()
+        else:
+            primary = OpenAICompatReranker(
+                base_url=settings.base_url or "",
+                model=settings.model,
+                api_key=settings.api_key,
+                timeout=settings.timeout,
+                bands=settings.bands,
+            )
+        return FallbackReranker(primary, heuristic)
+    return heuristic
 
 
 def confidence_of(

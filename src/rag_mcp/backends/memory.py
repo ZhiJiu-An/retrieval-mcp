@@ -226,8 +226,10 @@ class MemoryBackend:
                 frequency = counts.get(term, 0)
                 if not frequency:
                     continue
-                score += self._idf(term) * (frequency * (BM25_K1 + 1)) / (
-                    frequency + BM25_K1 * (1 - BM25_B + BM25_B * length / (self._avg_len or 1))
+                score += (
+                    self._idf(term)
+                    * (frequency * (BM25_K1 + 1))
+                    / (frequency + BM25_K1 * (1 - BM25_B + BM25_B * length / (self._avg_len or 1)))
                 )
             if score > 0:
                 scored.append((self._chunks[position], score))
@@ -329,4 +331,9 @@ def _split_section(text: str, size: int, overlap: int) -> list[str]:
 def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     if len(left) != len(right):
         return 0.0
-    return sum(a * b for a, b in zip(left, right, strict=False))
+    numerator = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return numerator / (left_norm * right_norm)

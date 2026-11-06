@@ -29,6 +29,9 @@ class Case:
     must_not_appear: tuple[str, ...]
     tags: tuple[str, ...]
     expect_section: str | None = None
+    #: 命中片段正文里必须出现的字符串（任一即可）。
+    #: 用来做**片段级**判定：章节对 + 片段里真有方剂名，才算答对。
+    expect_contains: tuple[str, ...] = ()
 
     @property
     def is_negative(self) -> bool:
@@ -44,6 +47,9 @@ class CaseResult:
     chars: int
     tool_calls: int = 1
     top_confidence: str = "unknown"
+    #: 与 doc_ids 等长的完整正文（不是 300 字片段）——判断答案是否真的在里面。
+    #: 找不到正文的位置为空串。`answer@k` 依赖它与 doc_ids 对齐。
+    texts: tuple[str, ...] = ()
 
     @property
     def hits_at_1(self) -> bool:
@@ -53,9 +59,39 @@ class CaseResult:
     def recalled(self) -> bool:
         return set(self.case.expect_doc_ids) <= set(self.doc_ids)
 
+    def recalled_at(self, k: int) -> bool:
+        """前 k 条是否覆盖全部期望文档。"""
+        return set(self.case.expect_doc_ids) <= set(self.doc_ids[:k])
+
     @property
     def leaked(self) -> list[str]:
         return [doc for doc in self.case.must_not_appear if doc in self.doc_ids]
+
+    @property
+    def answer_rank(self) -> int | None:
+        """答案真正出现的位置（第几条命中），没出现则 None。
+
+        判定要**同时**满足两条：
+          1. 该条属于正确的病证章节
+          2. 该条的**完整正文**里出现答案关键词
+        只判关键词不行 —— 方剂名在第三章的通治汇总表里也出现；
+        只看章节也不行 —— 同一章里可能有好几节，未必是答那一段。
+        """
+        if not self.case.expect_contains or not self.case.expect_doc_ids:
+            return None
+        for rank, doc_id in enumerate(self.doc_ids, start=1):
+            # texts 必须与 doc_ids 等长；早期只存前 5 条，answer@10 会静默漏判。
+            if rank > len(self.texts):
+                break
+            if doc_id not in self.case.expect_doc_ids:
+                continue
+            if any(word in self.texts[rank - 1] for word in self.case.expect_contains):
+                return rank
+        return None
+
+    def answer_in_top(self, k: int) -> bool:
+        rank = self.answer_rank
+        return rank is not None and rank <= k
 
     @property
     def false_confidence(self) -> bool:
@@ -93,8 +129,7 @@ class CaseResult:
         if not self.case.expect_doc_ids:
             return 1.0 if not self.doc_ids else 0.0
         gains = [
-            1.0 if doc_id in self.case.expect_doc_ids else 0.0
-            for doc_id in self.ranked_docs[:10]
+            1.0 if doc_id in self.case.expect_doc_ids else 0.0 for doc_id in self.ranked_docs[:10]
         ]
         dcg = sum(gain / math.log2(index + 2) for index, gain in enumerate(gains))
         ideal = sum(
@@ -122,10 +157,19 @@ class Report:
     def _positive(self) -> list[CaseResult]:
         return [item for item in self.results if not item.case.is_negative]
 
+    def recall_at(self, k: int) -> float:
+        """前 k 条召回率。`k` 必须显式传入，避免 --top-k 5 仍叫 recall@10。"""
+        positives = self._positive()
+        return (
+            sum(1 for item in positives if item.recalled_at(k)) / len(positives)
+            if positives
+            else 1.0
+        )
+
     @property
     def recall_at_k(self) -> float:
-        positives = self._positive()
-        return sum(1 for item in positives if item.recalled) / len(positives) if positives else 1.0
+        """兼容旧调用：默认按 top-k=10 的口径。"""
+        return self.recall_at(10)
 
     @property
     def accuracy_at_1(self) -> float:
@@ -144,13 +188,26 @@ class Report:
         positives = self._positive()
         return sum(item.ndcg for item in positives) / len(positives) if positives else 1.0
 
+    def answer_at(self, k: int) -> float | None:
+        """答案出现在前 k 条的比例 —— 检索「有没有用」的直接度量。
+
+        没有声明 `expect_contains` 的数据集返回 `None`（表示“没测”），
+        不能返回 1.0 假装全对。
+        """
+        scored = [item for item in self.results if item.case.expect_contains]
+        if not scored:
+            return None
+        return sum(1 for item in scored if item.answer_in_top(k)) / len(scored)
+
+    @property
+    def answer_at_1(self) -> float | None:
+        return self.answer_at(1)
+
     @property
     def silent_rate(self) -> float:
         """无答案用例真的返回空的比例。为空说明语料被过度过滤，为低说明召回在乱给。"""
         negatives = [
-            item
-            for item in self.results
-            if item.case.is_negative and not item.case.must_not_appear
+            item for item in self.results if item.case.is_negative and not item.case.must_not_appear
         ]
         if not negatives:
             return 1.0
@@ -191,13 +248,17 @@ class Report:
         wanted = item.case.expect_section
         return bool(wanted) and any(wanted in path for path in item.section_paths)
 
-    def summary(self) -> dict[str, float]:
+    def summary(self, *, recall_k: int = 10) -> dict[str, float | str]:
+        answer_1 = self.answer_at(1)
+        answer_5 = self.answer_at(5)
         return {
             "cases": len(self.results),
-            "recall@10": round(self.recall_at_k, 3),
+            f"recall@{recall_k}": round(self.recall_at(recall_k), 3),
             "accuracy@1": round(self.accuracy_at_1, 3),
             "mrr": round(self.mrr, 3),
             "ndcg@10": round(self.ndcg_at_10, 3),
+            "answer@1": round(answer_1, 3) if answer_1 is not None else "n/a",
+            "answer@5": round(answer_5, 3) if answer_5 is not None else "n/a",
             "silent_rate": round(self.silent_rate, 3),
             "leaks": len(self.leaks),
             "false_high": len(self.false_confidences),
@@ -227,12 +288,13 @@ def load_cases(path: Path | None = None) -> list[Case]:
                 must_not_appear=tuple(payload.get("must_not_appear") or ()),
                 tags=tuple(payload.get("tags") or ()),
                 expect_section=payload.get("expect_section"),
+                expect_contains=tuple(payload.get("expect_contains") or ()),
             )
         )
     return cases
 
 
-def format_table(rows: Sequence[tuple[str, dict[str, float]]]) -> str:
+def format_table(rows: Sequence[tuple[str, dict[str, float | str]]]) -> str:
     """把多个配置的结果并排放，用于 before/after 对比。"""
     if not rows:
         return "(no data)"

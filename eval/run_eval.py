@@ -45,7 +45,7 @@ def main() -> int:
     cases = load_cases(args.golden) if args.golden else cases_for(service)
 
     report = evaluate(service, cases, top_k=args.top_k)
-    agent = simulate_agent(service, cases)
+    agent = simulate_agent(service, cases, top_k=args.top_k)
 
     lexical_only = service.capabilities.retrieval_mode == "lexical"
     core = report.subset(exclude={"paraphrase"})
@@ -56,19 +56,20 @@ def main() -> int:
         "capabilities": service.capabilities.model_dump(),
         "config_hash": service.config_hash,
         "corpus_version": service.describe().sources[0].corpus_version,
-        "retrieval": report.summary(),
-        "retrieval_core": core.summary(),
-        "paraphrase": paraphrase.summary(),
-        "agent": agent_core.summary(),
+        "retrieval": report.summary(recall_k=args.top_k),
+        "retrieval_core": core.summary(recall_k=args.top_k),
+        "paraphrase": paraphrase.summary(recall_k=args.top_k),
+        "agent": agent_core.summary(recall_k=args.top_k),
     }
 
+    recall_key = f"recall@{args.top_k}"
     gates = {
         "leaks==0": len(report.leaks) == 0,
-        f"recall@10>={GATE_RECALL}": core.recall_at_k >= GATE_RECALL,
+        f"{recall_key}>={GATE_RECALL}": core.recall_at(args.top_k) >= GATE_RECALL,
         f"accuracy@1>={GATE_ACCURACY}": core.accuracy_at_1 >= GATE_ACCURACY,
         f"agent_success>={GATE_AGENT_SUCCESS}": agent_core.accuracy_at_1 >= GATE_AGENT_SUCCESS,
         f"median_calls<={GATE_MEDIAN_CALLS}": agent_core.median_calls <= GATE_MEDIAN_CALLS,
-        f"paraphrase>={GATE_PARAPHRASE}": (paraphrase.recall_at_k >= GATE_PARAPHRASE)
+        f"paraphrase>={GATE_PARAPHRASE}": (paraphrase.recall_at(args.top_k) >= GATE_PARAPHRASE)
         or lexical_only,
         "no_false_high==0": len(report.false_confidences) == 0,
     }
@@ -88,10 +89,14 @@ def _print_human(
     print("=" * 74)
     print("retrieval-mcp 评测")
     print("=" * 74)
-    print(f"检索模式 : {caps['retrieval_mode']}  (embedder={caps['embedder']}, "
-          f"reranker={caps['reranker']}, segmenter={caps['segmenter']})")
-    print(f"配置指纹 : config_hash={summary['config_hash']}  "
-          f"corpus_version={summary['corpus_version']}")
+    print(
+        f"检索模式 : {caps['retrieval_mode']}  (embedder={caps['embedder']}, "
+        f"reranker={caps['reranker']}, segmenter={caps['segmenter']})"
+    )
+    print(
+        f"配置指纹 : config_hash={summary['config_hash']}  "
+        f"corpus_version={summary['corpus_version']}"
+    )
     if lexical_only:
         print("注意     : 向量通道是本地词法桩，语义召回未生效。")
         print("           「同义改写」与「无答案沉默率」两项不计入门禁 —— 两者是同一个根因。")
@@ -103,9 +108,16 @@ def _print_human(
         ("同义改写", summary["paraphrase"]),
         ("Agent 代理", summary["agent"]),
     ]
+    recall_key = next(key for key in summary["retrieval"] if key.startswith("recall@"))
     keys = [
-        "cases", "recall@10", "accuracy@1", "mrr", "ndcg@10",
-        "silent_rate", "median_calls", "mean_chars",
+        "cases",
+        recall_key,
+        "accuracy@1",
+        "mrr",
+        "ndcg@10",
+        "silent_rate",
+        "median_calls",
+        "mean_chars",
     ]
     header = f"{'分组':<20}" + "".join(f"{key:>13}" for key in keys)
     print(header)

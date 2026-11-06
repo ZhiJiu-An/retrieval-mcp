@@ -26,7 +26,6 @@ from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from .budget import Limits
 from .config import Settings
 from .errors import RagError
 from .factory import build_principal, build_service
@@ -36,10 +35,12 @@ from .service import RetrievalService
 
 logger = logging.getLogger("rag_mcp")
 
-#: schema 里的硬上限。**唯一来源是 `Limits`**，`tests/test_schema.py` 会断言两者一致，
-#: 避免 v0 那种「schema 写 20、环境变量也写 20」的两处硬编码（MVP.md §5 已知债）。
-MAX_TOP_K_SCHEMA = Limits().max_top_k
-MAX_WINDOW_SCHEMA = Limits().max_window
+#: schema 只负责“模型不可能传一个离谱的值”的绝对硬上限。
+#: 实际生效上限由 `Limits.from_env()` 决定（RAG_MAX_TOP_K / RAG_MAX_WINDOW）。
+#: 旧实现把 schema 绑定成 `Limits()` 的默认值，导致 RAG_MAX_TOP_K=50
+#: 在 MCP 层仍被 20 挡住；这里解耦，服务端继续按 env 收敛。
+MAX_TOP_K_SCHEMA = 100
+MAX_WINDOW_SCHEMA = 10
 
 #: 只读 + 幂等 + 不依赖外部世界。声明出来，客户端才能自动批准、不弹确认框（DESIGN §5.4）。
 READ_ONLY: ToolAnnotations = ToolAnnotations(
@@ -193,7 +194,10 @@ async def search(
         Field(
             ge=1,
             le=MAX_TOP_K_SCHEMA,
-            description=f"返回条数上限，默认 8，最大 {MAX_TOP_K_SCHEMA}。越界会被收敛，不会报错",
+            description=(
+                f"返回条数上限。schema 硬上限 {MAX_TOP_K_SCHEMA}；"
+                "实际还会按服务端 RAG_MAX_TOP_K 收敛，越界不会报错"
+            ),
         ),
     ] = 8,
     department: Annotated[
@@ -247,7 +251,10 @@ async def fetch(
         Field(
             ge=0,
             le=MAX_WINDOW_SCHEMA,
-            description=f"chunk 模式下向前后各扩展几块，默认 1，最大 {MAX_WINDOW_SCHEMA}",
+            description=(
+                f"chunk 模式下向前后各扩展几块。schema 硬上限 {MAX_WINDOW_SCHEMA}；"
+                "实际还会按服务端 RAG_MAX_WINDOW 收敛"
+            ),
         ),
     ] = 1,
 ) -> FetchResult:
@@ -272,11 +279,23 @@ async def read_document(doc_id: str) -> str:
     """整篇文档作为 resource 暴露，客户端可直接挂载而不占用一次工具回合。
 
     鉴权在这里**独立执行**，不依赖「id 是 search 给的」（DESIGN §8.3 铁律 2）。
+    resource 可能读取整篇敏感文档，因此也要有结构化日志（DESIGN §11）。
     """
+    started = time.perf_counter()
+    doc_id_hash = hashlib.sha1(doc_id.encode("utf-8")).hexdigest()[:8]
     try:
-        return get_service().read_document(current_principal(), doc_id)
+        text = get_service().read_document(current_principal(), doc_id)
     except RagError as err:
+        _emit("read_document", started, outcome=err.code, doc_id_hash=doc_id_hash)
         raise ResourceError(err.message) from err
+    _emit(
+        "read_document",
+        started,
+        outcome="ok",
+        doc_id_hash=doc_id_hash,
+        chars=len(text),
+    )
+    return text
 
 
 # ---------------------------------------------------------------- 入口

@@ -37,7 +37,9 @@ def test_expected_sections_are_hit(report):
     if not with_section:
         pytest.skip("没有声明 expect_section 的用例")
     missed = [
-        item.case.id for item in with_section if not report._section_ok(item)  # noqa: SLF001
+        item.case.id
+        for item in with_section
+        if not report._section_ok(item)  # noqa: SLF001
     ]
     assert not missed, f"小节未命中：{missed}"
 

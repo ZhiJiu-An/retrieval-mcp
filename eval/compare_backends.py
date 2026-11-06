@@ -25,7 +25,7 @@ for entry in (_ROOT / "src", _ROOT / "eval"):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))
 
-from harness import format_table  # noqa: E402
+from harness import format_table, load_cases  # noqa: E402
 from runner import cases_for, evaluate  # noqa: E402
 
 from rag_mcp.config import Settings, reload_dotenv  # noqa: E402
@@ -57,22 +57,25 @@ def build(settings: Settings, mode: str, rerank: bool, floor: bool):
 def main() -> int:
     reload_dotenv()
     base = Settings.from_env()
+    golden = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     print("=" * 88)
     print("检索策略对比 —— 同一套考题，只改「走哪几路 + 要不要重排」")
     print("=" * 88)
 
-    rows: list[tuple[str, dict[str, float]]] = []
+    rows: list[tuple[str, dict[str, float | str]]] = []
     latencies: dict[str, float] = {}
 
     for name, mode, rerank, floor in CONFIGS:
         service = build(base, mode, rerank, floor)
-        cases = cases_for(service)
+        cases = load_cases(golden) if golden else cases_for(service)
 
         started = time.perf_counter()
         report = evaluate(service, cases)
         elapsed = (time.perf_counter() - started) * 1000 / max(1, len(cases))
         latencies[name] = elapsed
 
+        answer_1 = report.answer_at(1)
+        answer_5 = report.answer_at(5)
         summary = {
             "cases": len(cases),
             "recall@10": round(report.recall_at_k, 3),
@@ -83,6 +86,10 @@ def main() -> int:
             # 反例（语料里没有答案的问题）被正确压下去的比例。
             # 这是「相关性下限」唯一能起作用的地方，也是排名指标看不到的差异。
             "silent@neg": round(report.subset(tags={"no_answer"}).silent_rate, 2),
+            # 最严判定：第 1 条既在对的章节、正文里又真有答案关键词。
+            # 数据集没有 expect_contains 时是 n/a，不是 1.0。
+            "answer@1": round(answer_1, 2) if answer_1 is not None else "n/a",
+            "answer@5": round(answer_5, 2) if answer_5 is not None else "n/a",
         }
         rows.append((name, summary))
         print(f"  完成 {name}")
@@ -90,7 +97,7 @@ def main() -> int:
     print()
     print(format_table(rows))
     print()
-    label = '单次检索平均耗时（含网络）'
+    label = "单次检索平均耗时（含网络）"
     print(f"{label:<26}" + "".join(f"{latencies[n]:>12.0f}ms" for n, *_ in CONFIGS))
 
     baseline = rows[0][1]
@@ -98,9 +105,14 @@ def main() -> int:
     print()
     print("-" * 88)
     print("相对纯向量基线的增量：")
-    for key in ("recall@10", "acc@1", "ndcg@10", "silent@neg"):
-        delta = final[key] - baseline[key]
-        print(f"  {key:<10} {baseline[key]:.3f} → {final[key]:.3f}   ({delta:+.3f})")
+    for key in ("recall@10", "acc@1", "answer@1", "answer@5", "silent@neg"):
+        left = baseline.get(key)
+        right = final.get(key)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            delta = right - left
+            print(f"  {key:<10} {left:.3f} → {right:.3f}   ({delta:+.3f})")
+        else:
+            print(f"  {key:<10} n/a（当前评测集没有 expect_contains）")
     print(
         f"  {'平均上下文':<10} {baseline['chars']:>4} → {final['chars']:>4} 字/题 "
         f"({final['chars'] - baseline['chars']:+d})"

@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,wordseg]"
+
+      - name: Lint
+        run: |
+          ruff check src tests eval
+          ruff format --check src tests eval
+
+      - name: Unit tests (offline)
+        run: pytest tests -q
+
+      - name: Eval smoke (offline memory backend)
+        env:
+          RAG_BACKEND: memory
+          RAG_RETRIEVAL_MODE: lexical
+          RAG_RERANK: "off"
+          RAG_EMBEDDING_BASE_URL: ""
+          RAG_EMBEDDING_MODEL: ""
+          RAG_EMBEDDING_API_KEY: ""
+        run: pytest eval -q

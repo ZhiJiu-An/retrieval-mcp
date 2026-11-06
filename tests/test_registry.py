@@ -48,6 +48,7 @@ def test_registry_can_load_a_snapshot_from_elsewhere():
     assert snapshot.schema_version == "7"
     assert snapshot.names == ("region",)
     assert snapshot.is_legal_value("region", "cn")
+    assert snapshot.get("region").sql_column is None
 
 
 def test_limits_clamp_instead_of_raising():
@@ -79,3 +80,21 @@ def test_short_text_is_not_truncated():
 
 def test_response_bytes_measures_utf8_payload():
     assert response_bytes({"k": "中文"}) > len('{"k":"中文"}') - 1
+
+
+def test_field_spec_can_map_to_a_different_sql_column():
+    snapshot = Registry.from_dict(
+        {
+            "schema_version": "7",
+            "fields": [
+                {
+                    "name": "updated_after",
+                    "type": "date",
+                    "sql_column": "updated_at",
+                    "description": "日期",
+                }
+            ],
+        }
+    )
+
+    assert snapshot.get("updated_after").sql_column == "updated_at"

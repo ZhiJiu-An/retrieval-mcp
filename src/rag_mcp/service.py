@@ -19,6 +19,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from .backends.base import ChunkRecord, RetrievalBackend
@@ -36,7 +37,7 @@ from .errors import (
     RagError,
     hint_line,
 )
-from .fusion import rrf
+from .fusion import RRF_K, rrf
 from .models import (
     DescribeResult,
     FetchResult,
@@ -55,7 +56,27 @@ from .policy import (
 )
 from .registry import Registry
 from .rerank import Reranker, confidence_of
-from .text import as_untrusted_block, has_word_segmenter, normalize, snippet, tokenize, unique
+from .text import (
+    TOKENIZER_VERSION,
+    as_untrusted_block,
+    has_word_segmenter,
+    normalize,
+    sanitize,
+    snippet,
+    tokenize,
+    unique,
+)
+
+
+@lru_cache(maxsize=64)
+def _visibility_for(principal: Principal):
+    """同一进程内 principal 数量很少；缓存闭包让 backend 的 allowed 缓存能命中。"""
+    return visibility_predicate(principal)
+
+
+@lru_cache(maxsize=64)
+def _acl_for(principal: Principal):
+    return acl_predicate(principal)
 
 
 @dataclass(frozen=True)
@@ -69,9 +90,14 @@ class ConfigFingerprint:
     embedder: str
     reranker: str
     segmenter: str
+    tokenizer_version: str
     schema_version: str
+    retrieval_mode: str
+    resolved_mode: str
     chunk_size: int
     chunk_overlap: int
+    default_top_k: int
+    rrf_k: int
     limits: dict[str, Any]
 
     def hash(self) -> str:
@@ -80,9 +106,14 @@ class ConfigFingerprint:
                 "embedder": self.embedder,
                 "reranker": self.reranker,
                 "segmenter": self.segmenter,
+                "tokenizer_version": self.tokenizer_version,
                 "schema_version": self.schema_version,
+                "retrieval_mode": self.retrieval_mode,
+                "resolved_mode": self.resolved_mode,
                 "chunk_size": self.chunk_size,
                 "chunk_overlap": self.chunk_overlap,
+                "default_top_k": self.default_top_k,
+                "rrf_k": self.rrf_k,
                 "limits": self.limits,
             },
             sort_keys=True,
@@ -134,12 +165,30 @@ class RetrievalService:
             embedder=embedder.model_id,
             reranker=reranker.model_id,
             segmenter="word" if has_word_segmenter() else "bigram",
+            tokenizer_version=TOKENIZER_VERSION,
             schema_version=registry.schema_version,
+            retrieval_mode=settings.retrieval_mode,
+            resolved_mode=self.resolved_mode,
             chunk_size=settings.chunk_size,
             chunk_overlap=settings.chunk_overlap,
+            default_top_k=settings.limits.default_top_k,
+            rrf_k=RRF_K,
             limits=self._limits.as_dict(),
         )
         self.config_hash = self._fingerprint.hash()
+
+    def close(self) -> None:
+        """释放 SQLite 连接 / HTTP 连接池。stdio 进程退出时非必须，但便于测试和长进程。"""
+        for component in (self._backend, self._embedder, self._reranker):
+            close = getattr(component, "close", None)
+            if callable(close):
+                close()
+
+    def __enter__(self) -> RetrievalService:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # ------------------------------------------------------------ 元信息
 
@@ -234,38 +283,52 @@ class RetrievalService:
                 retryable=True,
             )
 
-        filter_query = compile_filters(self._registry, filters or {})
+        filter_query = compile_filters(self._registry, filters or {}).with_visibility(principal)
+        query_truncated = len(normalized) > self._limits.max_query_chars
+        if query_truncated:
+            normalized = normalized[: self._limits.max_query_chars]
         tokens = unique(tokenize(normalized))
 
         scored, total = self._retrieve(principal, normalized, tokens, filter_query)
         limit = self._limits.clamp_top_k(top_k)
-        selected = self._apply_diversity(scored, limit)
+        selected, per_doc_limited = self._apply_diversity(scored, limit)
+        truncated_reason: str | None = None
+        if total > len(selected):
+            truncated_reason = "per_doc_limit" if per_doc_limited else "top_k"
 
         hits = [
             Hit(
                 chunk_id=item.chunk.chunk_id,
                 doc_id=item.chunk.doc_id,
-                title=str(item.chunk.meta.get("title", "")),
-                section_path=item.chunk.section_path,
-                snippet=snippet(item.chunk.text, tokens, self._limits.snippet_chars),
+                title=sanitize(str(item.chunk.meta.get("title", ""))),
+                section_path=sanitize(item.chunk.section_path),
+                # 片段同样是不可信输入：必须带来源边界，且用完整块正文做注入检测
+                # （300 字窗口可能正好截掉注入模板）。
+                snippet=as_untrusted_block(
+                    snippet(item.chunk.text, tokens, self._limits.snippet_chars),
+                    f"{item.chunk.meta.get('title', '')} §{item.chunk.section_path}",
+                    scan_text=item.chunk.text,
+                ),
                 confidence=item.confidence,  # type: ignore[arg-type]
-                updated_at=str(item.chunk.meta.get("updated_at", "")),
+                updated_at=sanitize(str(item.chunk.meta.get("updated_at", ""))),
             )
             for item in selected
         ]
 
         result = SearchResult(
             query=normalized,
+            query_truncated=query_truncated,
             hits=hits,
             returned=len(hits),
             total=total,
             truncated=total > len(hits),
+            truncated_reason=truncated_reason,  # type: ignore[arg-type]
             filters_applied=filter_query.applied,
             corpus_version=self._backend.corpus_version,
             schema_version=self._registry.schema_version,
             config_hash=self.config_hash,
             chars_returned=0,
-            hint=self._search_hint(filter_query, hits, total),
+            hint=self._search_hint(filter_query, hits, total, per_doc_limited),
         )
         result.chars_returned = _payload_chars(result)
         return result
@@ -295,7 +358,7 @@ class RetrievalService:
             filters=filter_query,
             # 检索用「可见性」闸门（ACL + 废止状态）；按 id 取数只用 ACL，
             # 这样废止文档搜不到但仍能按 id 查阅（policy.visibility_predicate）
-            allow=visibility_predicate(principal),
+            allow=_visibility_for(principal),
             depth=self._limits.recall_depth,
         )
 
@@ -391,7 +454,9 @@ class RetrievalService:
             raise RagError(
                 code=EMPTY_QUERY, message="query 不能为空", hint="给出要检索的问题", retryable=True
             )
-        filter_query = compile_filters(self._registry, filters or {})
+        filter_query = compile_filters(self._registry, filters or {}).with_visibility(principal)
+        if len(normalized) > self._limits.max_query_chars:
+            normalized = normalized[: self._limits.max_query_chars]
         tokens = unique(tokenize(normalized))
 
         lexical, dense = self._recall_channels(principal, normalized, tokens, filter_query)
@@ -420,25 +485,36 @@ class RetrievalService:
             for chunk, score in ranked
         ]
 
-    def _apply_diversity(self, scored: list[_Scored], limit: int) -> list[_Scored]:
+    def _apply_diversity(self, scored: list[_Scored], limit: int) -> tuple[list[_Scored], bool]:
         """同一文档最多占 `per_doc_limit` 条。
 
         没有这一步，top-8 会全是同一篇的 8 个相邻块 —— 召回看似很高，
         实际只覆盖了一个文档（DESIGN §6.2）。
+
+        返回 `(选中列表, 是否被 per-doc 限制过)`，让上层能给出正确的下一步
+        提示：per-doc 截断时调大 top_k 没有用。
         """
         chosen: list[_Scored] = []
         per_doc: dict[str, int] = {}
+        skipped_by_doc = False
         for item in scored:
             if len(chosen) >= limit:
                 break
             doc_id = item.chunk.doc_id
             if per_doc.get(doc_id, 0) >= self._limits.per_doc_limit:
+                skipped_by_doc = True
                 continue
             per_doc[doc_id] = per_doc.get(doc_id, 0) + 1
             chosen.append(item)
-        return chosen
+        return chosen, skipped_by_doc
 
-    def _search_hint(self, filter_query: Any, hits: list[Hit], total: int) -> str | None:
+    def _search_hint(
+        self,
+        filter_query: Any,
+        hits: list[Hit],
+        total: int,
+        per_doc_limited: bool = False,
+    ) -> str | None:
         if filter_query.impossible:
             return hint_line(
                 FILTER_UNKNOWN_VALUE,
@@ -452,6 +528,13 @@ class RetrievalService:
                 "或调大 top_k",
             )
         if total > len(hits):
+            if per_doc_limited:
+                return hint_line(
+                    TRUNCATED,
+                    f"共 {total} 条相关块，这里只返回 {len(hits)} 条；"
+                    f"同一文档最多 {self._limits.per_doc_limit} 条，"
+                    "可换更具体的关键词或收紧过滤条件，调大 top_k 不会增加同文档条数",
+                )
             return hint_line(
                 TRUNCATED,
                 f"共 {total} 条相关块，这里只返回 {len(hits)} 条；"
@@ -477,7 +560,7 @@ class RetrievalService:
                 retryable=True,
             )
 
-        allow = acl_predicate(principal)
+        allow = _acl_for(principal)
         if doc_id:
             return self._fetch_document(doc_id, allow)
         assert chunk_id is not None
@@ -489,15 +572,17 @@ class RetrievalService:
             raise self._not_found(f"doc_id={doc_id}")
 
         text, truncated = truncate_text(doc.text, self._limits.max_fetch_chars)
+        title = sanitize(doc.title)
         result = FetchResult(
             chunk_id=None,
             doc_id=doc.doc_id,
-            title=doc.title,
-            section_path=doc.title,
-            text=as_untrusted_block(text, f"{doc.title} | 整篇"),
+            title=title,
+            section_path=title,
+            text=as_untrusted_block(text, f"{title} | 整篇", scan_text=f"{title}\n{text}"),
             truncated=truncated,
             resolved_by="exact",
-            updated_at=str(doc.meta.get("updated_at", "")),
+            updated_at=sanitize(str(doc.meta.get("updated_at", ""))),
+            corpus_version=self._backend.corpus_version,
             chars_returned=0,
             hint=hint_line(TRUNCATED, "整篇已截断；改用 chunk 模式按段读取") if truncated else None,
         )
@@ -519,9 +604,7 @@ class RetrievalService:
         last = min(len(doc.chunks) - 1, chunk.position + window)
         selected = list(doc.chunks[first : last + 1])
 
-        text, truncated = truncate_text(
-            _compose(selected), self._limits.max_fetch_chars
-        )
+        text, truncated = truncate_text(_compose(selected), self._limits.max_fetch_chars)
 
         hint: str | None = None
         if resolved.resolved_by != "exact":
@@ -536,19 +619,36 @@ class RetrievalService:
         result = FetchResult(
             chunk_id=chunk.chunk_id,
             doc_id=doc.doc_id,
-            title=doc.title,
-            section_path=chunk.section_path,
-            text=as_untrusted_block(text, f"{doc.title} §{chunk.heading or chunk.section_path}"),
+            title=sanitize(doc.title),
+            section_path=sanitize(chunk.section_path),
+            text=as_untrusted_block(
+                text,
+                f"{doc.title} §{chunk.heading or chunk.section_path}",
+                scan_text=f"{doc.title}\n{text}",
+            ),
             truncated=truncated,
             prev_chunk_id=doc.chunks[first - 1].chunk_id if first > 0 else None,
             next_chunk_id=doc.chunks[last + 1].chunk_id if last + 1 < len(doc.chunks) else None,
             resolved_by=resolved.resolved_by,  # type: ignore[arg-type]
-            updated_at=str(doc.meta.get("updated_at", "")),
+            updated_at=sanitize(str(doc.meta.get("updated_at", ""))),
+            corpus_version=self._backend.corpus_version,
             chars_returned=0,
             hint=hint,
         )
         result.chars_returned = _payload_chars(result)
         return result
+
+    def chunk_text(self, principal: Principal, chunk_id: str) -> str | None:
+        """取某个块的完整正文（仅评测/内部使用）。
+
+        300 字片段可能截掉方剂名，所以评测要看完整正文；但它仍是受 ACL
+        保护的数据，不能成为公开旁路。
+        """
+        resolved = self._backend.get_chunk(chunk_id)
+        chunk = resolved.chunk
+        if chunk is None or not _acl_for(principal)(chunk.meta):
+            return None
+        return chunk.text
 
     def read_document(self, principal: Principal, doc_id: str) -> str:
         """resource `rag://docs/{doc_id}` 的内容。
@@ -557,15 +657,23 @@ class RetrievalService:
         resource 是最常见的鉴权绕过点（DESIGN §8.3 铁律 2）。
         """
         doc = self._backend.get_document(doc_id)
-        if doc is None or not doc.chunks or not acl_predicate(principal)(doc.meta):
+        if doc is None or not doc.chunks or not _acl_for(principal)(doc.meta):
             raise self._not_found(f"doc_id={doc_id}")
 
         text, truncated = truncate_text(doc.text, self._limits.max_resource_chars)
-        body = as_untrusted_block(text, f"{doc.title} | 整篇（resource）")
-        header = f"# {doc.title}\n\n> 更新于 {doc.meta.get('updated_at', '')}\n\n"
+        title = sanitize(doc.title)
+        updated_at = sanitize(str(doc.meta.get("updated_at", "")))
+        # 标题/更新时间也属于文档内容，放进不可信边界之内，避免“头部在边界外”
+        # 被用来伪造一段看似可信的指令。
+        header = f"# {title}\n\n> 更新于 {updated_at}\n\n"
+        body = as_untrusted_block(
+            header + text,
+            f"{title} | 整篇（resource）",
+            scan_text=f"{title}\n{text}",
+        )
         if truncated:
             body += "\n\n[文档过长已截断：请改用 fetch(chunk_id) 按段读取剩余部分]"
-        return header + body
+        return body
 
     # ------------------------------------------------------------ 工具
 

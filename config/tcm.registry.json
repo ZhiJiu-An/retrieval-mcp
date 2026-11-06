@@ -1,0 +1,28 @@
+{
+  "schema_version": "1",
+  "note": "《中医内科学》语料的词表快照。真实语料的 department/doc_type 与样例不同，必须单独配置，否则 list_sources 会给出错误的可过滤值。",
+  "fields": [
+    {
+      "name": "department",
+      "type": "enum",
+      "values": [
+        "tcm"
+      ],
+      "description": "文档所属部门"
+    },
+    {
+      "name": "doc_type",
+      "type": "enum",
+      "values": [
+        "manual"
+      ],
+      "description": "文档类型"
+    },
+    {
+      "name": "updated_after",
+      "type": "date",
+      "description": "只保留该日期（含）之后更新的文档，格式 YYYY-MM-DD",
+      "sql_column": "updated_at"
+    }
+  ]
+}

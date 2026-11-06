@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rag-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "企业知识库只读检索 MCP server：list_sources / search / fetch（混合召回 + ACL + 评测门禁）"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,6 +21,7 @@ dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
 [project.scripts]
 rag-mcp = "rag_mcp.server:main"
 rag-mcp-doctor = "rag_mcp.doctor:main"
+rag-mcp-migrate = "rag_mcp.migrate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .budget import Limits
+from .env import env_bool, env_float, env_int
+from .errors import BAD_CONFIGURATION, RagError
 
 _PKG = Path(__file__).parent
 _REPO_ROOT = _PKG.parent.parent
@@ -77,6 +79,8 @@ class RerankSettings:
     def describe(self) -> str:
         if not self.enabled:
             return "disabled"
+        if self.provider == "heuristic":
+            return "heuristic"
         return f"{self.provider}:{self.model}" if self.remote else "heuristic"
 
 
@@ -110,8 +114,8 @@ class Settings:
 
         groups = os.getenv("RAG_PRINCIPAL_GROUPS", "all")
         return cls(
-            data_path=Path(os.getenv("RAG_DATA_PATH") or _DEFAULT_DATA),
-            registry_path=Path(os.getenv("RAG_REGISTRY_PATH") or _DEFAULT_REGISTRY),
+            data_path=_resolve_path(os.getenv("RAG_DATA_PATH"), _DEFAULT_DATA),
+            registry_path=_resolve_path(os.getenv("RAG_REGISTRY_PATH"), _DEFAULT_REGISTRY),
             backend=os.getenv("RAG_BACKEND", "memory").strip().lower() or "memory",
             retrieval_mode=os.getenv("RAG_RETRIEVAL_MODE", "auto").strip().lower() or "auto",
             db_path=_path_or_none(os.getenv("RAG_DB_PATH")),
@@ -123,22 +127,22 @@ class Settings:
                 base_url=_blank_to_none(os.getenv("RAG_EMBEDDING_BASE_URL")),
                 model=os.getenv("RAG_EMBEDDING_MODEL", "").strip(),
                 api_key=_first_env("RAG_EMBEDDING_API_KEY", "DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
-                dim=_int_env("RAG_EMBEDDING_DIM", 256),
-                timeout=_float_env("RAG_EMBEDDING_TIMEOUT", 5.0),
-                batch=_int_env("RAG_EMBEDDING_BATCH", 10),
+                dim=env_int("RAG_EMBEDDING_DIM", 256),
+                timeout=env_float("RAG_EMBEDDING_TIMEOUT", 5.0),
+                batch=env_int("RAG_EMBEDDING_BATCH", 10),
             ),
             rerank=RerankSettings(
-                enabled=_bool_env("RAG_RERANK", True),
+                enabled=env_bool("RAG_RERANK", True),
                 provider=os.getenv("RAG_RERANK_PROVIDER", "openai").strip().lower(),
                 base_url=_blank_to_none(os.getenv("RAG_RERANK_BASE_URL")),
                 model=os.getenv("RAG_RERANK_MODEL", "").strip(),
                 api_key=_first_env("RAG_RERANK_API_KEY", "DASHSCOPE_API_KEY", "BAILIAN_API_KEY"),
-                timeout=_float_env("RAG_RERANK_TIMEOUT", 10.0),
-                confidence_high=_float_env("RAG_CONFIDENCE_HIGH", 0.50),
-                confidence_medium=_float_env("RAG_CONFIDENCE_MEDIUM", 0.25),
+                timeout=env_float("RAG_RERANK_TIMEOUT", 10.0),
+                confidence_high=env_float("RAG_CONFIDENCE_HIGH", 0.50),
+                confidence_medium=env_float("RAG_CONFIDENCE_MEDIUM", 0.25),
             ),
-            chunk_size=_int_env("RAG_CHUNK_SIZE", 360),
-            chunk_overlap=_int_env("RAG_CHUNK_OVERLAP", 48),
+            chunk_size=env_int("RAG_CHUNK_SIZE", 360),
+            chunk_overlap=env_int("RAG_CHUNK_OVERLAP", 48),
         )
 
     def with_retrieval_mode(self, mode: str) -> Settings:
@@ -150,17 +154,11 @@ class Settings:
 
     def with_principal(self, user_id: str, groups: tuple[str, ...], max_level: str) -> Settings:
         """测试与多身份验证用：换身份不改其它配置。"""
-        return Settings(
-            data_path=self.data_path,
-            registry_path=self.registry_path,
-            limits=self.limits,
+        return replace(
+            self,
             principal_id=user_id,
             principal_groups=groups,
             principal_max_level=max_level,
-            embedding=self.embedding,
-            rerank=self.rerank,
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
         )
 
 
@@ -169,6 +167,9 @@ class Settings:
 #: 仓库根的 `.env`。它是 gitignore 的，用来放 key，不进版本库。
 DOTENV_PATH = _REPO_ROOT / ".env"
 _loaded_dotenv = False
+#: profile 所在目录。相对路径（RAG_DB_PATH 等）优先按仓库根解析，
+#: 再回退到 profile 目录 / cwd；见 `_resolve_path`。
+_active_base_dir: Path = _REPO_ROOT
 #: 启动时就已存在的真实环境变量 —— 任何文件都不许覆盖它们。
 _protected: set[str] | None = None
 
@@ -181,18 +182,29 @@ def load_dotenv(path: Path | None = None) -> None:
     反过来让 profile 覆盖真实环境变量又会让 `RAG_BACKEND=sqlite rag-mcp` 这种
     显式命令行参数失效。所以三层优先级写死在这里。
 
+    `RAG_ENV_FILE` 的相对路径按仓库根解析，而不是进程 cwd —— MCP 客户端
+    通常不会把 cwd 设成仓库根目录；显式指定的 profile 不存在时必须报错，
+    不能静默退回样例语料。
+
     不引入 python-dotenv 依赖 —— 只需要支持 `KEY=VALUE` 与 `#` 注释。
     """
-    global _loaded_dotenv
+    global _loaded_dotenv, _active_base_dir
     if _loaded_dotenv:
         return
-    _loaded_dotenv = True
 
-    _apply_file(path or DOTENV_PATH, override=False)
+    root_file = path or DOTENV_PATH
+    _apply_file(root_file, override=False)
 
-    profile = _path_or_none(os.getenv("RAG_ENV_FILE"))
-    if profile is not None and profile != (path or DOTENV_PATH):
+    profile_raw = os.getenv("RAG_ENV_FILE")
+    profile = _resolve_profile(profile_raw)
+    if profile is not None and profile != root_file:
         _apply_file(profile, override=True)
+        _active_base_dir = profile.parent
+    else:
+        _active_base_dir = DOTENV_PATH.parent
+    # 只有成功加载后才置位；profile 缺失时下一次调用仍会报错，
+    # 不会静默退回样例语料。
+    _loaded_dotenv = True
 
 
 def _apply_file(path: Path, *, override: bool) -> None:
@@ -246,9 +258,46 @@ def _first_env(*names: str) -> str | None:
     return None
 
 
+def _resolve_profile(value: str | None) -> Path | None:
+    """`RAG_ENV_FILE` 为空返回 None；相对路径按仓库根解析。"""
+    if value is None or not value.strip():
+        return None
+    raw = value.strip()
+    path = Path(raw)
+    candidates = [path] if path.is_absolute() else [DOTENV_PATH.parent / path, Path.cwd() / path]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    tried = "、".join(str(candidate) for candidate in candidates)
+    raise RagError(
+        code=BAD_CONFIGURATION,
+        message=f"RAG_ENV_FILE 指向的 profile 不存在：{raw}（已尝试 {tried}）",
+        hint="检查 RAG_ENV_FILE 路径；相对路径优先按项目根目录解析",
+        retryable=False,
+    )
+
+
 def _path_or_none(value: str | None) -> Path | None:
-    """空字符串视为未配置，而不是「当前目录」。"""
-    return Path(value) if value and value.strip() else None
+    """空字符串视为未配置；相对路径按项目根优先解析，避免依赖进程 cwd。"""
+    if value is None or not value.strip():
+        return None
+    return _resolve_path(value, None)
+
+
+def _resolve_path(value: str | None, default: Path | None) -> Path:
+    if value is None or not value.strip():
+        if default is None:
+            raise ValueError("path 不能为空")
+        return default
+    path = Path(value.strip())
+    if path.is_absolute():
+        return path
+    # 仓库根优先，其次 profile 目录，最后 cwd（兼容旧行为）
+    candidates = [DOTENV_PATH.parent / path, _active_base_dir / path, Path.cwd() / path]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return (DOTENV_PATH.parent / path).resolve()
 
 
 def _blank_to_none(value: str | None) -> str | None:
@@ -256,30 +305,3 @@ def _blank_to_none(value: str | None) -> str | None:
         return None
     value = value.strip()
     return value or None
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}

@@ -4,17 +4,51 @@ import os
 
 import pytest
 
-# **单元测试不许联网。**
-# `Settings.from_env()` 会读 `.env`，而开发者本地的 `.env` 里可能有真实的向量模型
-# 端点与 key —— 那会让测试慢到几十秒、并且随网络抖动而失败（实测过：同一台机器
-# 上 embedding 接口耗时 0.3s / 20.3s / 2.3s 三连跳）。
-# 这里在 import 阶段就把端点清空，`load_dotenv()` 不会覆盖已存在的变量，
-# 于是全部单测都跑在本地词法桩上。
-# 要跑真实模型请用 `eval/`，那里的目的就是验证真实链路。
-OFFLINE_VARS = (
+# **单元测试不许联网，也不许被开发者本地的 `.env` / shell 变量污染。**
+#
+# 之前只清 embedding 变量，结果是：
+#   RAG_BACKEND=sqlite RAG_DB_PATH=rag.db pytest tests/test_server.py
+# 会拿到真实 rag.db，样例语料断言直接失败。
+# 同理 .env 里配了远程 rerank 时，单元测试会偷偷联网。
+#
+# 这里在每条用例前后恢复**所有**会影响 Settings.from_env() 的变量，
+# 并显式固定成「样例语料 + 本地词法桩 + 启发式重排」。
+MANAGED_ENV = (
+    "RAG_ENV_FILE",
+    "RAG_BACKEND",
+    "RAG_DB_PATH",
+    "RAG_DATA_PATH",
+    "RAG_REGISTRY_PATH",
+    "RAG_RETRIEVAL_MODE",
+    "RAG_PRINCIPAL_ID",
+    "RAG_PRINCIPAL_GROUPS",
+    "RAG_PRINCIPAL_MAX_LEVEL",
     "RAG_EMBEDDING_BASE_URL",
     "RAG_EMBEDDING_MODEL",
     "RAG_EMBEDDING_API_KEY",
+    "RAG_EMBEDDING_DIM",
+    "RAG_EMBEDDING_BATCH",
+    "RAG_EMBEDDING_TIMEOUT",
+    "RAG_RERANK",
+    "RAG_RERANK_PROVIDER",
+    "RAG_RERANK_BASE_URL",
+    "RAG_RERANK_MODEL",
+    "RAG_RERANK_API_KEY",
+    "RAG_RERANK_TIMEOUT",
+    "RAG_CONFIDENCE_HIGH",
+    "RAG_CONFIDENCE_MEDIUM",
+    "RAG_MAX_TOP_K",
+    "RAG_DEFAULT_TOP_K",
+    "RAG_RECALL_DEPTH",
+    "RAG_PER_DOC_LIMIT",
+    "RAG_RELEVANCE_FLOOR",
+    "RAG_DENSE_FLOOR",
+    "RAG_SNIPPET_CHARS",
+    "RAG_MAX_WINDOW",
+    "RAG_MAX_FETCH_CHARS",
+    "RAG_MAX_RESOURCE_CHARS",
+    "RAG_CHUNK_SIZE",
+    "RAG_CHUNK_OVERLAP",
     "DASHSCOPE_API_KEY",
     "BAILIAN_API_KEY",
 )
@@ -22,7 +56,7 @@ OFFLINE_VARS = (
 
 @pytest.fixture(autouse=True)
 def _offline_embedding():
-    """单元测试一律走本地词法桩。
+    """单元测试一律走样例语料 + 本地词法桩。
 
     两个都试过的坑：
 
@@ -33,12 +67,20 @@ def _offline_embedding():
 
     所以用 function 作用域：只包住 `tests/` 里的每条用例，测完立刻还原。
     """
-    saved = {name: os.environ.get(name) for name in OFFLINE_VARS}
-    for name in OFFLINE_VARS:
-        os.environ[name] = ""
+    saved = {name: os.environ.get(name) for name in MANAGED_ENV}
+    for name in MANAGED_ENV:
+        os.environ.pop(name, None)
+    # 显式给出测试基线，而不是依赖默认值/根 .env
+    os.environ["RAG_BACKEND"] = "memory"
+    os.environ["RAG_RETRIEVAL_MODE"] = "auto"
+    os.environ["RAG_RERANK"] = "on"  # 本地启发式，不联网
+    os.environ["RAG_EMBEDDING_BASE_URL"] = ""
+    os.environ["RAG_EMBEDDING_MODEL"] = ""
+    os.environ["RAG_EMBEDDING_API_KEY"] = ""
     _reset_service()
     yield
-    for name, value in saved.items():
+    for name in MANAGED_ENV:
+        value = saved.get(name)
         if value is None:
             os.environ.pop(name, None)
         else:

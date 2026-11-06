@@ -33,6 +33,9 @@ NO_HITS = "NO_HITS"
 NOT_FOUND_OR_FORBIDDEN = "NOT_FOUND_OR_FORBIDDEN"
 #: 后端/模型超时或不可用。
 BACKEND_UNAVAILABLE = "BACKEND_UNAVAILABLE"
+#: 配置本身不可用（未知 backend、索引不存在、embedding/索引不匹配等）。
+#: 这类错误通常应该 fail fast，而不是降级成另一个语料继续服务。
+BAD_CONFIGURATION = "BAD_CONFIGURATION"
 
 # ---- 以下两个不是「错误」，而是**提示码**：它们只出现在 `hint` 里，不进错误通道 ----
 

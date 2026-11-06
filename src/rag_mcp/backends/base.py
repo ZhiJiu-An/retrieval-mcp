@@ -26,7 +26,8 @@ from ..policy import AllowFn, FilterQuery
 RankedChunk = tuple["ChunkRecord", float]
 
 #: `{doc_id}#c{ordinal:03d}-{anchor}`，例如 `hr-policy-leave#c003-a1b2c3`
-CHUNK_ID_RE = re.compile(r"^(?P<doc_id>.+?)#c(?P<ordinal>\d{3})-(?P<anchor>[0-9a-f]{6})$")
+#: `ordinal` 至少 3 位、不设上限：单文档超过 999 块时仍可解析。
+CHUNK_ID_RE = re.compile(r"^(?P<doc_id>.+?)#c(?P<ordinal>\d{3,})-(?P<anchor>[0-9a-f]{6})$")
 
 
 @dataclass(frozen=True)

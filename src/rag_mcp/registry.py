@@ -34,6 +34,9 @@ class FieldSpec:
     type: str  # "enum" | "date"
     values: tuple[str, ...] | None
     description: str
+    #: 落库列名。由索引侧词表定义，检索侧只消费；默认与字段同名。
+    #: 新增 filter 字段时不需要再改 SqliteBackend 的 if/elif。
+    sql_column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +79,9 @@ class Registry:
                 type=str(item.get("type", "enum")),
                 values=tuple(str(v) for v in item["values"]) if item.get("values") else None,
                 description=str(item.get("description", "")),
+                sql_column=(
+                    str(item["sql_column"]) if item.get("sql_column") is not None else None
+                ),
             )
             for item in payload.get("fields", [])
         )

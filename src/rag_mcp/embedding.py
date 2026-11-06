@@ -24,6 +24,7 @@ import httpx
 
 from .config import EmbeddingSettings
 from .errors import BACKEND_UNAVAILABLE, RagError
+from .http import post_json
 from .text import tokenize
 
 Vector = list[float]
@@ -107,38 +108,45 @@ class OpenAICompatEmbedder:
         self._timeout = timeout
         self._batch = batch_size
         self._cache: dict[str, Vector] = {}
+        # 连接池复用：ingest 会发几十次 batch 请求，不能每次重新握手。
+        self._client = httpx.Client(timeout=timeout)
 
     def embed(self, texts: Sequence[str]) -> list[Vector]:
         unique = [text for text in dict.fromkeys(texts) if text not in self._cache]
+        resolved: dict[str, Vector] = {}
         for start in range(0, len(unique), self._batch):
             window = unique[start : start + self._batch]
             for text, vector in zip(window, self._request(window), strict=True):
+                resolved[text] = vector
+                # 软上限只影响缓存，不影响本次返回。以前缓存满 4096 后
+                # 新文本不写 cache，最后 self._cache[text] 直接 KeyError。
                 if len(self._cache) < 4096:
                     self._cache[text] = vector
-        return [self._cache[text] for text in texts]
+        return [self._cache[text] if text in self._cache else resolved[text] for text in texts]
+
+    def close(self) -> None:
+        self._client.close()
 
     def _request(self, texts: list[str]) -> list[Vector]:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         try:
-            response = httpx.post(
+            response = post_json(
+                self._client,
                 f"{self.base_url}/embeddings",
                 headers=headers,
-                json={"model": self.model, "input": texts},
-                timeout=self._timeout,
+                payload={"model": self.model, "input": texts},
             )
-            response.raise_for_status()
             payload = response.json()
             rows = sorted(payload["data"], key=lambda row: row.get("index", 0))
-            vectors = [[float(v) for v in row["embedding"]] for row in rows]
+            vectors = [_normalize([float(v) for v in row["embedding"]]) for row in rows]
         except Exception as exc:  # 网络、鉴权、响应形状统统算不可用
             raise RagError(
                 code=BACKEND_UNAVAILABLE,
                 message=f"向量模型不可用：{type(exc).__name__}",
                 hint=(
-                    "检查 RAG_EMBEDDING_BASE_URL / MODEL / API_KEY，"
-                    "或先跑 python -m rag_mcp.doctor"
+                    "检查 RAG_EMBEDDING_BASE_URL / MODEL / API_KEY，或先跑 python -m rag_mcp.doctor"
                 ),
                 retryable=True,
                 detail={"embedder": self.model_id, "error": str(exc)[:200]},
@@ -169,3 +177,11 @@ def build_embedder(settings: EmbeddingSettings) -> Embedder:
             dim=settings.dim,
         )
     return HashingEmbedder(dim=settings.dim)
+
+
+def _normalize(vector: Vector) -> Vector:
+    """L2 归一化。余弦计算依赖它；第三方 OpenAI 兼容端点未必归一化。"""
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0.0:
+        return vector
+    return [value / norm for value in vector]

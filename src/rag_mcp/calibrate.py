@@ -121,15 +121,21 @@ def suggest(probes: list[Probe]) -> dict[str, Any]:
     high = max(floor + 0.1, statistics.median(pos))
     medium = (floor + high) / 2
 
+    # 正反例重叠时 `neg_high * 0.98` 可能把 floor 推到 1.0 附近；
+    # 必须夹到合法区间，否则生成的 profile 会被启动校验直接拒绝。
+    floor = _round(min(0.95, max(0.0, floor)))
+    high = _round(min(1.0, max(floor + 0.05, high)))
+    medium = _round(min(high - 0.05, max(floor, medium)))
+
     suggestions.update(
         {
             "separated": separated,
             "positives_min": round(pos_low, 4),
             "positives_median": round(statistics.median(pos), 4),
             "negatives_max": round(neg_high, 4),
-            "relevance_floor": _round(floor),
-            "confidence_high": _round(high),
-            "confidence_medium": _round(medium),
+            "relevance_floor": floor,
+            "confidence_high": high,
+            "confidence_medium": medium,
         }
     )
     if pos_dense and neg_dense:
@@ -140,7 +146,15 @@ def suggest(probes: list[Probe]) -> dict[str, Any]:
                 "dense_positives_min": round(min(pos_dense), 4),
                 "dense_negatives_max": round(max(neg_dense), 4),
                 "dense_floor": _round(
-                    (max(neg_dense) + min(pos_dense)) / 2 if d_sep else max(neg_dense) * 0.98
+                    min(
+                        1.0,
+                        max(
+                            0.0,
+                            (max(neg_dense) + min(pos_dense)) / 2
+                            if d_sep
+                            else max(neg_dense) * 0.98,
+                        ),
+                    )
                 ),
             }
         )
@@ -151,8 +165,7 @@ def _separation_comment(report: dict[str, Any]) -> str:
     if not report["separated"]:
         return "# 警告: 正反例分数重叠，阈值只是折中值"
     return (
-        f"# 分离: 反例最高 {report['negatives_max']:.4f} < "
-        f"正例最低 {report['positives_min']:.4f}"
+        f"# 分离: 反例最高 {report['negatives_max']:.4f} < 正例最低 {report['positives_min']:.4f}"
     )
 
 
@@ -206,18 +219,29 @@ def main() -> int:
     print(f"  RAG_CONFIDENCE_HIGH={report['confidence_high']}")
     print(f"  RAG_CONFIDENCE_MEDIUM={report['confidence_medium']}")
     if "dense_floor" in report:
-        print(f"  RAG_DENSE_FLOOR={report['dense_floor']}"
-              f"   （反例最高余弦 {report['dense_negatives_max']:.4f} / "
-              f"正例最低余弦 {report['dense_positives_min']:.4f}）")
+        print(
+            f"  RAG_DENSE_FLOOR={report['dense_floor']}"
+            f"   （反例最高余弦 {report['dense_negatives_max']:.4f} / "
+            f"正例最低余弦 {report['dense_positives_min']:.4f}）"
+        )
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         lines = [
             "# 由 `python -m rag_mcp.calibrate` 生成，请勿手改",
+            "# 阈值 overlay：backend/db/registry 已固定；",
+            "# embedding / rerank 端点与 key 仍从根 .env 继承（不要把密钥写进本文件）",
             f"# 索引: {service.describe().sources[0].name}",
             f"# 重排: {service.capabilities.reranker}",
             f"# 考题: {len(cases)} 条（正例 {report['positives']} / 反例 {report['negatives']}）",
             _separation_comment(report),
+            "",
+            f"RAG_BACKEND={settings.backend}",
+        ]
+        if settings.db_path is not None:
+            lines.append(f"RAG_DB_PATH={settings.db_path.resolve()}")
+        lines.append(f"RAG_REGISTRY_PATH={settings.registry_path.resolve()}")
+        lines += [
             "",
             f"RAG_RELEVANCE_FLOOR={report['relevance_floor']}",
             f"RAG_CONFIDENCE_HIGH={report['confidence_high']}",

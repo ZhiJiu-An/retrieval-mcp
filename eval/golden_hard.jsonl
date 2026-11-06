@@ -1,0 +1,10 @@
+{"id": "h01", "query": "一吹风就打喷嚏流清鼻涕还怕冷", "principal": "staff", "expect_doc_ids": ["tcm-92c9b521"], "expect_contains": ["荆防败毒散"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h02", "query": "大夫说我肝阳上亢 老是头晕耳鸣", "principal": "staff", "expect_doc_ids": ["tcm-c3840c0d"], "expect_contains": ["天麻钩藤饮"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h03", "query": "血糖高 中医管这个叫什么病", "principal": "staff", "expect_doc_ids": ["tcm-2537746b"], "expect_contains": ["三多"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h04", "query": "TIA 短暂性脑缺血 中医怎么看", "principal": "staff", "expect_doc_ids": ["tcm-c3840c0d"], "expect_contains": ["中经络"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h05", "query": "最近头疼 痰多 像裹着湿布", "principal": "staff", "expect_doc_ids": ["tcm-c3840c0d"], "expect_contains": ["半夏白术天麻汤"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h06", "query": "胸前区压榨样疼 冠心病", "principal": "staff", "expect_doc_ids": ["tcm-501fd469"], "expect_contains": ["血府逐瘀汤"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h07", "query": "拉肚子一天十几次 水样便", "principal": "staff", "expect_doc_ids": ["tcm-01d7c4f3"], "expect_contains": ["葛根芩连汤"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h08", "query": "半夜老是醒 心烦睡不着", "principal": "staff", "expect_doc_ids": ["tcm-501fd469"], "expect_contains": ["酸枣仁汤", "黄连温胆汤"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h09", "query": "眼睛发黄 皮肤还痒", "principal": "staff", "expect_doc_ids": ["tcm-4f9f9114"], "expect_contains": ["茵陈蒿汤"], "must_not_appear": [], "tags": ["hard"]}
+{"id": "h10", "query": "腿肿 按下去一个坑 半天不回弹", "principal": "staff", "expect_doc_ids": ["tcm-e185560e"], "expect_contains": ["五皮饮", "真武汤"], "must_not_appear": [], "tags": ["hard"]}

@@ -60,6 +60,11 @@ def evaluate(service, cases: list[Case] | None = None, *, top_k: int = 10) -> Re
                 section_paths=[hit.section_path for hit in result.hits],
                 chars=result.chars_returned,
                 top_confidence=result.hits[0].confidence if result.hits else "unknown",
+                # 必须与 doc_ids 等长；answer@k 可能看第 6 条及以后。
+                texts=tuple(
+                    service.chunk_text(principal(case.principal), hit.chunk_id) or ""
+                    for hit in result.hits
+                ),
             )
         )
     return report
@@ -99,8 +104,9 @@ def simulate_agent(service, cases: list[Case] | None = None, *, top_k: int = 8) 
             )
             continue
 
-        # 第二步：截短查询（真实的改写动作，server 不该替 Agent 做这件事）
-        shortened = " ".join(case.query.split()[:1]) or case.query
+        # 第二步：截短查询（真实的改写动作，server 不该替 Agent 做这件事）。
+        # 中文没有空格，旧实现会原样重跑一遍，Agent 代理指标因此虚高。
+        shortened = _shorten_query(case.query)
         try:
             second = service.search(actor, query=shortened, top_k=top_k)
             calls += 1
@@ -129,6 +135,16 @@ def simulate_agent(service, cases: list[Case] | None = None, *, top_k: int = 8) 
             )
         )
     return report
+
+
+def _shorten_query(query: str) -> str:
+    parts = query.split()
+    if len(parts) > 1:
+        return parts[0]
+    if len(query) <= 2:
+        return query
+    # 中文按字符截半；保留至少 2 个字，避免变成空查询
+    return query[: max(2, len(query) // 2)].strip() or query
 
 
 def _satisfied(case: Case, result) -> bool:

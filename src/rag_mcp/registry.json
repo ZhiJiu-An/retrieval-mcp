@@ -5,19 +5,29 @@
     {
       "name": "department",
       "type": "enum",
-      "values": ["hr", "finance", "engineering"],
+      "values": [
+        "hr",
+        "finance",
+        "engineering"
+      ],
       "description": "文档所属部门"
     },
     {
       "name": "doc_type",
       "type": "enum",
-      "values": ["policy", "faq", "manual", "notice"],
+      "values": [
+        "policy",
+        "faq",
+        "manual",
+        "notice"
+      ],
       "description": "文档类型"
     },
     {
       "name": "updated_after",
       "type": "date",
-      "description": "只保留该日期（含）之后更新的文档，格式 YYYY-MM-DD"
+      "description": "只保留该日期（含）之后更新的文档，格式 YYYY-MM-DD",
+      "sql_column": "updated_at"
     }
   ]
 }

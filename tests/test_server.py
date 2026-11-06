@@ -68,14 +68,14 @@ def test_instructions_carry_retrieval_strategy():
 # ---------------------------------------------------------------- schema 一致性
 
 
-def test_schema_bounds_come_from_single_source():
-    """v0 的债：`top_k` 上限在 schema 和 config 两处硬编码，改一处就不一致。"""
-    assert Limits().max_top_k == MAX_TOP_K_SCHEMA
-    assert Limits().max_window == MAX_WINDOW_SCHEMA
+def test_schema_bounds_are_hard_caps_above_service_limits():
+    """schema 负责绝对硬上限；env 的 RAG_MAX_* 由服务端继续收敛。"""
+    assert Limits().max_top_k <= MAX_TOP_K_SCHEMA
+    assert Limits().max_window <= MAX_WINDOW_SCHEMA
 
     search_schema = _tools()["search"].input_schema
-    assert search_schema["properties"]["top_k"]["maximum"] == Limits().max_top_k
-    assert _tools()["fetch"].input_schema["properties"]["window"]["maximum"] == Limits().max_window
+    assert search_schema["properties"]["top_k"]["maximum"] == MAX_TOP_K_SCHEMA
+    assert _tools()["fetch"].input_schema["properties"]["window"]["maximum"] == MAX_WINDOW_SCHEMA
 
 
 def test_filter_params_match_registry():
@@ -165,3 +165,12 @@ def test_document_resource_enforces_acl():
     """resource 独立鉴权：不能因为 id 看起来合法就放行（DESIGN §8.3 铁律 2）。"""
     with pytest.raises(ResourceError):
         asyncio.run(mcp.read_resource("rag://docs/hr-notice-org-2026"))
+
+
+def test_resource_read_is_logged(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="rag_mcp"):
+        asyncio.run(mcp.read_resource("rag://docs/eng-manual-vpn"))
+
+    assert any("read_document" in record.message for record in caplog.records)

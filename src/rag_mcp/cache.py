@@ -17,12 +17,25 @@ import hashlib
 import json
 import logging
 import os
+import sys
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger("rag_mcp.cache")
 
-#: 默认缓存目录在仓库根的 `.cache/`（已 gitignore）。
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache"
+
+def _user_cache_root() -> Path:
+    """平台默认缓存目录；不要写进 site-packages / 仓库安装目录。"""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches"
+    if os.name == "nt":
+        return Path(os.getenv("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    return Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache")
+
+
+#: 默认缓存目录：用户级 cache，避免安装到只读目录时写失败；
+#: 旧版本在仓库根 `.cache/`，可以用 RAG_CACHE_DIR 指回去。
+DEFAULT_CACHE_DIR = _user_cache_root() / "rag-mcp"
 
 
 def cache_dir() -> Path:
@@ -70,15 +83,22 @@ class VectorCache:
         if not self._active or not vectors:
             return
         path = self._path(key)
+        tmp_path: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            # 先写临时文件再改名：进程被 SIGTERM 时不会留下半截缓存
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps({"meta": meta, "vectors": vectors}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            tmp.replace(path)
+            # 并发进程不能共用同一个 .tmp：用 mkstemp 保证每个写者一个文件，
+            # 写完再 os.replace 原子替换；读方只会看到旧文件或完整新文件。
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"meta": meta, "vectors": vectors}, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
             logger.info("vector cache write: %s (%d vectors)", path.name, len(vectors))
         except OSError as exc:  # 缓存失败不影响主流程
             logger.warning("vector cache write failed: %s", exc)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)

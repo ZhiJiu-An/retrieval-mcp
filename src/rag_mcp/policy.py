@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import date
 from typing import Any
 
 from .errors import BAD_ARGUMENT, BAD_DATE, RagError
@@ -109,6 +110,22 @@ class FilterQuery:
     values: dict[str, str] = field(default_factory=dict)
     impossible: bool = False
     invalid: tuple[tuple[str, str], ...] = ()
+    #: 检索侧的 ACL 快照，供 SQLite 把权限下推到 SQL（pre-filter）。
+    #: None 表示不启用（兼容直接调用后端的旧路径）。
+    max_level_rank: int | None = None
+    groups: frozenset[str] | None = None
+    exclude_superseded: bool = False
+    #: 字段名 -> SQLite 列名（来自 registry 的 sql_column 快照）。
+    sql_columns: dict[str, str] = field(default_factory=dict)
+
+    def with_visibility(self, principal: Principal) -> FilterQuery:
+        """把调用方身份编译成可下推的 ACL 条件；仍保留 allow 谓词做复核。"""
+        return replace(
+            self,
+            max_level_rank=LEVEL_ORDER[principal.max_level],
+            groups=principal.groups,
+            exclude_superseded=True,
+        )
 
     @property
     def applied(self) -> dict[str, str]:
@@ -129,6 +146,7 @@ def compile_filters(
     - 正常 → `values` 按字面下传。
     """
     values: dict[str, str] = {}
+    sql_columns: dict[str, str] = {}
     invalid: list[tuple[str, str]] = []
 
     for name, value in raw.items():
@@ -161,11 +179,23 @@ def compile_filters(
                 )
             invalid.append((name, value))
             continue
-        values[name] = value
+        sql_columns[name] = spec.sql_column or name
+        if spec.type == "date":
+            # `date.fromisoformat` 在 3.11+ 也接受 20250101 / 周日期等紧凑格式。
+            # 后端是按字符串比较的，必须统一规范化成 YYYY-MM-DD，否则
+            # "2025-03-01" >= "20250101" 会算出错误结果。
+            values[name] = date.fromisoformat(value).isoformat()
+        else:
+            values[name] = value
 
     if invalid:
-        return FilterQuery(values=values, impossible=True, invalid=tuple(invalid))
-    return FilterQuery(values=values)
+        return FilterQuery(
+            values=values,
+            impossible=True,
+            invalid=tuple(invalid),
+            sql_columns=sql_columns,
+        )
+    return FilterQuery(values=values, sql_columns=sql_columns)
 
 
 def invalid_filter_hint(query: FilterQuery, registry: Registry) -> str:

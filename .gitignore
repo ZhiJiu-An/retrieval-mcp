@@ -11,3 +11,5 @@ dist/
 .cache/
 rag.db
 *.db
+*.db.*
+.DS_Store

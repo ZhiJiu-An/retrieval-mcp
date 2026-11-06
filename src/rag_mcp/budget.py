@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, replace
 from typing import Any
+
+from .env import env_float, env_int
 
 _MIB = 1024
 
@@ -43,6 +44,9 @@ class Limits:
     max_window: int = 3
     max_fetch_chars: int = 4000
     max_resource_chars: int = 8000
+    #: 查询原文上限。超长文本会放大 tokenize/embedding 成本，也可能触发远端
+    #: 请求体限制；截断而不是报错，保证 Agent 仍能拿到结果。
+    max_query_chars: int = 2000
 
     # ---- 整次响应 ----
     max_response_bytes: int = 32 * _MIB
@@ -52,17 +56,24 @@ class Limits:
         base = cls()
         return replace(
             base,
-            max_top_k=_int_env("RAG_MAX_TOP_K", base.max_top_k),
-            default_top_k=_int_env("RAG_DEFAULT_TOP_K", base.default_top_k),
-            recall_depth=_int_env("RAG_RECALL_DEPTH", base.recall_depth),
-            per_doc_limit=_int_env("RAG_PER_DOC_LIMIT", base.per_doc_limit),
-            relevance_floor=_float_env("RAG_RELEVANCE_FLOOR", base.relevance_floor),
-            dense_floor=_float_env("RAG_DENSE_FLOOR", base.dense_floor),
-            snippet_chars=_int_env("RAG_SNIPPET_CHARS", base.snippet_chars),
-            max_window=_int_env("RAG_MAX_WINDOW", base.max_window),
-            max_fetch_chars=_int_env("RAG_MAX_FETCH_CHARS", base.max_fetch_chars),
-            max_resource_chars=_int_env("RAG_MAX_RESOURCE_CHARS", base.max_resource_chars),
-            max_response_bytes=_int_env("RAG_MAX_RESPONSE_BYTES", base.max_response_bytes),
+            max_top_k=env_int("RAG_MAX_TOP_K", base.max_top_k, minimum=1),
+            default_top_k=env_int("RAG_DEFAULT_TOP_K", base.default_top_k, minimum=1),
+            recall_depth=env_int("RAG_RECALL_DEPTH", base.recall_depth, minimum=1),
+            per_doc_limit=env_int("RAG_PER_DOC_LIMIT", base.per_doc_limit, minimum=1),
+            relevance_floor=env_float(
+                "RAG_RELEVANCE_FLOOR", base.relevance_floor, minimum=0.0, maximum=1.0
+            ),
+            dense_floor=env_float("RAG_DENSE_FLOOR", base.dense_floor, minimum=0.0, maximum=1.0),
+            snippet_chars=env_int("RAG_SNIPPET_CHARS", base.snippet_chars, minimum=1),
+            max_window=env_int("RAG_MAX_WINDOW", base.max_window, minimum=0),
+            max_fetch_chars=env_int("RAG_MAX_FETCH_CHARS", base.max_fetch_chars, minimum=1),
+            max_resource_chars=env_int(
+                "RAG_MAX_RESOURCE_CHARS", base.max_resource_chars, minimum=1
+            ),
+            max_query_chars=env_int("RAG_MAX_QUERY_CHARS", base.max_query_chars, minimum=1),
+            max_response_bytes=env_int(
+                "RAG_MAX_RESPONSE_BYTES", base.max_response_bytes, minimum=1
+            ),
         )
 
     def clamp_top_k(self, value: int | None) -> int:
@@ -79,6 +90,7 @@ class Limits:
     def as_dict(self) -> dict[str, Any]:
         return {
             "max_top_k": self.max_top_k,
+            "default_top_k": self.default_top_k,
             "recall_depth": self.recall_depth,
             "per_doc_limit": self.per_doc_limit,
             "relevance_floor": self.relevance_floor,
@@ -87,29 +99,8 @@ class Limits:
             "max_window": self.max_window,
             "max_fetch_chars": self.max_fetch_chars,
             "max_resource_chars": self.max_resource_chars,
+            "max_query_chars": self.max_query_chars,
         }
-
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if 0.0 <= value <= 1.0 else default
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 def truncate_text(text: str, limit: int) -> tuple[str, bool]:

@@ -179,7 +179,13 @@ def test_fetch_window_zero_returns_whole_section(service, staff):
     hit = service.search(staff, query="年假 天数", top_k=1).hits[0]
     fetched = service.fetch(staff, chunk_id=hit.chunk_id, window=0)
 
-    assert len(fetched.text) > len(hit.snippet)
+    # snippet 现在带不可信边界；比较正文而不是含 wrapper 的总长度。
+    # 小节可能短于 snippet 预算，此时两者正文相同是正常的 —— 关键是
+    # fetch 必须包含 snippet 的正文，而不是只返回当前小块。
+    snippet_body = _body(hit.snippet)
+    fetched_body = _body(fetched.text)
+    assert snippet_body in fetched_body
+    assert len(fetched_body) >= len(snippet_body)
 
 
 def test_fetch_wraps_content_as_untrusted_data(service, staff):
@@ -312,9 +318,7 @@ def test_diversity_limits_hits_per_document():
 
 def test_config_hash_tracks_retrieval_config_not_corpus(service, settings):
     base = build_service(settings)
-    other_embedder = build_service(
-        Settings(embedding=EmbeddingSettings(dim=512))
-    )
+    other_embedder = build_service(Settings(embedding=EmbeddingSettings(dim=512)))
 
     assert base.config_hash != other_embedder.config_hash
     assert base._backend.corpus_version == other_embedder._backend.corpus_version
@@ -332,3 +336,11 @@ def test_describe_exposes_registry_fields(service):
     fields = {field.name for field in service.describe().sources[0].filter_fields}
 
     assert fields == {"department", "doc_type", "updated_after"}
+
+
+def test_fetch_reports_corpus_version(service, staff):
+    result = service.search(staff, query="年假", top_k=1)
+    fetched = service.fetch(staff, chunk_id=result.hits[0].chunk_id)
+
+    assert fetched.corpus_version == result.corpus_version
+    assert fetched.corpus_version
