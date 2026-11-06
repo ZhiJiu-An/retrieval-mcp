@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rag-mcp"
 version = "0.3.0"
+license = { text = "Apache-2.0" }
 description = "企业知识库只读检索 MCP server：list_sources / search / fetch（混合召回 + ACL + 评测门禁）"
 requires-python = ">=3.11"
 dependencies = [

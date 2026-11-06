@@ -13,6 +13,8 @@ rag.db
 *.db
 *.db.*
 .DS_Store
-
+#文档不进入git仓库
+.MVP.md
+.DESIGN.md
 # 私有审查/实施记录，不进入公开仓库
 artical/

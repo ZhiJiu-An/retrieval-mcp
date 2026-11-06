@@ -1,220 +1,242 @@
 # retrieval-mcp
 
-> **一句话**：让 AI（Claude Code / 各类 IDE 里的模型）能**问你自己的文档库**，
-> 并且只返回它有权限看的、只返回片段、还告诉你这条结果可不可信。
+> 让 AI（Claude Code / Cursor / Cherry Studio 等 MCP 客户端）能够查询你自己的文档库：
+> 只返回当前身份可见的片段，并告诉 AI 这条结果可不可信。
 
-它同时是一份**可复用的检索优化模板**：样例语料 30 秒可跑；接入新语料时主要替换
-`registry.json` / `ingest` / 后端，检索域（`service.py` / `policy.py`）不用重写。
-设计取舍见 [DESIGN.md](DESIGN.md)，对外契约与验收矩阵见 [MVP.md](MVP.md)。
+`retrieval-mcp` 是一个只读检索 MCP server，也可以作为接入自己语料的模板。
+它不生成答案，只负责把相关文档片段交给 AI。
 
----
+## 目录
 
-## 30 秒理解它是什么
+- [1. 项目介绍](#1-项目介绍)
+- [2. 快速开始](#2-快速开始)
+- [3. 配置](#3-配置)
+- [4. 接入一个新场景](#4-接入一个新场景)
+- [5. 测试与评测](#5-测试与评测)
+- [6. 如何贡献](#6-如何贡献)
+- [7. 开源协议](#7-开源协议)
 
-```
-你：感冒的病因病机是什么？
-AI：（调用 search → 拿到 3 条片段 → 判断够不够 → 需要时调用 fetch 展开）
-AI：根据《中医内科学》第四章……
-```
+## 1. 项目介绍
 
-**AI 自己不会查书。** 这个项目就是给它装的手：三个动作 —— 找资料、看上下文、问「你这有什么」。
+它提供三个工具和一个资源：
 
-它**不生成答案**（那是 AI 的事），**不管入库之外的运维**（那是数据库的事），**不提供界面**。
+| 动作 | 输入 | 输出 | 用途 |
+|---|---|---|---|
+| `list_sources` | 无 | 文档/块数量、可过滤字段、检索能力 | 确认库里有什么 |
+| `search` | 查询 + 过滤条件 | 片段列表（`chunk_id` + `confidence`） | 找依据 |
+| `fetch` | `chunk_id` 或 `doc_id` | 片段上下文 / 整篇文档 | 展开依据 |
+| `rag://docs/{doc_id}` | — | 整篇 Markdown | 直接读取整篇 |
 
----
+适合：
 
-## 30 秒跑起来
+- 想让 AI 查内部制度、手册、FAQ、知识库。
+- 需要按部门、密级、文档类型做权限隔离。
+- 希望 AI 只拿片段，避免一次塞入整篇文档。
+
+不适合：
+
+- 需要网页后台、上传管理界面或多租户 HTTP 服务。
+- 需要由检索服务直接生成答案或写报告。
+- 需要修改、删除文档（入库是独立进程）。
+
+## 2. 快速开始
+
+### 环境
+
+- Python 3.11+
+- 可选：`jieba`，用于中文词级分词；不装会退化为 bigram
+
+### 安装
 
 ```bash
-# 1) 用内置样例语料（6 篇假制度，不需要任何 key —— 用来验证接线是否通）
-.venv/bin/rag-mcp
+git clone <repo>
+cd retrieval-mcp
 
-# 2) 可选：用真实语料（《中医内科学》884 块，需要可用的百炼 key/网络）
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[wordseg]"
+```
+
+### 用样例语料自检
+
+仓库自带 6 篇样例制度，不需要额外准备语料：
+
+```bash
+python -m rag_mcp.doctor
+```
+
+看到索引、向量模型、重排模型三段输出即可。样例默认使用本地词法桩，不需要 key。
+
+### 接入 MCP 客户端
+
+把 `command` 指向安装后的可执行文件，路径使用绝对路径：
+
+```json
+{
+  "mcpServers": {
+    "retrieval-mcp": {
+      "command": "/absolute/path/to/retrieval-mcp/.venv/bin/rag-mcp"
+    }
+  }
+}
+```
+
+使用真实语料时，在客户端配置里加 `env`：
+
+```json
+{
+  "mcpServers": {
+    "retrieval-mcp": {
+      "command": "/absolute/path/to/retrieval-mcp/.venv/bin/rag-mcp",
+      "env": {
+        "RAG_ENV_FILE": "config/tcm.env"
+      }
+    }
+  }
+}
+```
+
+### 可选：接入真实语料
+
+`rag.db` 不包含在仓库中，需要先用 `ingest` 生成：
+
+```bash
+python -m rag_mcp.ingest \
+  --source json \
+  --data 你的语料.json \
+  --out rag.db
+
 RAG_ENV_FILE=config/tcm.env .venv/bin/rag-mcp
-
-# 出问题先跑这个，它会告诉你哪一环坏了
-RAG_ENV_FILE=config/tcm.env .venv/bin/python -m rag_mcp.doctor
 ```
 
-挂到客户端（Claude Code / Cursor / Cherry Studio 等）时，把 `command` 指向 `.venv/bin/rag-mcp` 即可。
+## 3. 配置
 
----
+配置文件分两层：
 
-## 它到底给你什么
+- 根目录 `.env`：密钥和默认配置，不进入版本库。
+- `RAG_ENV_FILE`：按语料/场景切换的 profile，例如 `config/tcm.env`。
 
-对 AI 只暴露三个工具 + 一个资源：
+加载优先级：真实环境变量 > `RAG_ENV_FILE` > 根 `.env`。
 
-| 动作 | 输入 | 输出 | 什么时候用 |
-|---|---|---|---|
-| `list_sources` | 无 | 有多少篇/块、能按什么过滤、当前检索能力 | 不确定库里有什么 |
-| `search` | 问题 + 过滤条件 | 8 条（可调）片段，每条带 `chunk_id` 和可信度 `high/medium/low/unknown` | 找依据 |
-| `fetch` | `chunk_id` 或 `doc_id` | 那一段的前后文 / 整篇 | 片段不够时展开 |
-| `rag://docs/{doc_id}` | — | 整篇 markdown | 直连读取，不占回合 |
+### 3.1 语料与后端
 
-**三个设计上的取舍**（这是它和「直接接个向量库」的区别）：
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `RAG_BACKEND` | `memory` | `memory`（JSON 样例）或 `sqlite`（rag.db） |
+| `RAG_DB_PATH` | 空 | sqlite 索引路径 |
+| `RAG_DATA_PATH` | 内置样例 | memory 后端的 JSON 语料 |
+| `RAG_REGISTRY_PATH` | 内置词表 | 可过滤字段的词表快照 |
 
-1. **只给片段，不给全文。** 300 字的片段 + id，够 AI 判断「值不值得展开」，省上下文。
-2. **可信度是服务端算的，不是 AI 猜的。** `high` 才建议直接答；`low` 建议先 `fetch`。
-3. **权限在检索前生效。** 看不到的文档根本不会出现在结果里，也不会通过「结果条数」泄漏存在性。
+### 3.2 身份与权限
 
----
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `RAG_PRINCIPAL_ID` | `local-dev` | 调用方身份 |
+| `RAG_PRINCIPAL_GROUPS` | `all` | 可见组，逗号分隔 |
+| `RAG_PRINCIPAL_MAX_LEVEL` | `internal` | `public` / `internal` / `confidential` |
 
-## 它明确不做什么
+身份来自进程启动环境，不接受工具参数传入。
 
-| 不做 | 谁做 |
-|---|---|
-| 生成答案 | AI 自己 |
-| 网页界面 / 上传后台 | 不在本项目范围 |
-| 多用户 HTTP 服务 | 只做 stdio，一个进程一个身份 |
-| 修改/删除文档 | 入库是独立进程（`python -m rag_mcp.ingest`） |
-| 会话记忆 | AI 客户端的事 |
+### 3.3 模型
 
----
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `RAG_EMBEDDING_BASE_URL` | 空 | OpenAI 兼容 embedding 端点 |
+| `RAG_EMBEDDING_MODEL` | 空 | embedding 模型名 |
+| `RAG_EMBEDDING_API_KEY` | 空 | API key，也认 `DASHSCOPE_API_KEY` / `BAILIAN_API_KEY` |
+| `RAG_RERANK_PROVIDER` | `openai` | `openai` / `dashscope` / `heuristic` |
+| `RAG_RERANK_BASE_URL` | 空 | rerank 端点 |
+| `RAG_RERANK_MODEL` | 空 | rerank 模型名 |
+| `RAG_RERANK` | `on` | `off` 表示关闭重排，此时 `confidence` 为 `unknown` |
 
-## 目录：每个文件一句话
+不填 embedding 三项时使用本地词法桩，仍可运行，但没有语义召回。
+不填 rerank 端点时使用本地启发式重排。
 
-```
-src/rag_mcp/
-├── server.py         ← 对 AI 暴露的三个工具（协议层，不含业务逻辑）
-├── service.py        ← 检索编排：召回 → 融合 → 重排 → 裁剪（核心业务都在这里）
-├── policy.py         ← 谁能看到什么：ACL + 废止状态 + 过滤条件
-├── budget.py         ← 所有上限的唯一来源（返回条数、片段长度…）
-├── errors.py         ← 结构化错误码，让 AI 知道怎么改
-├── registry.json     ← 可过滤字段的词表（由入库侧定义）
-├── text.py           ← 中文分词、清洗、片段截取、注入内容标注
-├── env.py            ← 环境变量解析（唯一实现，含范围校验）
-├── http.py           ← HTTP 连接复用 + 429/5xx 重试
-├── embedding.py      ← 向量模型（远程 API / 本地桩）
-├── rerank.py         ← 重排（百炼 / OpenAI 兼容 / 启发式 / 关闭）
-├── fusion.py         ← 两路结果融合（RRF）
-├── cache.py          ← 向量索引缓存（默认用户缓存目录，冷启动 3.5s → 0.37s）
-├── ingest.py         ← 入库 CLI：把语料变成 rag.db
-├── migrate.py        ← 旧索引升级：chunk_id v2 / FTS 重建
-├── doctor.py         ← 自检：语料 / 向量模型 / 重排模型 三段排查
-└── backends/
-    ├── base.py       ← 后端只需实现 4 个方法
-    ├── memory.py     ← 读 JSON（开发/测试）
-    └── sqlite.py     ← 读 rag.db（生产用）
+### 3.4 检索预算
 
-eval/                 ← 评测：golden 用例 + 指标 + 安全门禁
-config/tcm.env        ← 真实的「中医语料」配置档
-config/tcm.registry.json ← 中医语料词表快照
-.env                  ← 密钥与默认配置（不进版本库）
-DESIGN.md             ← 为什么这么设计（含所有决策的理由与代价）
-MVP.md                ← 对外功能契约与验收矩阵
-```
+| 变量 | 默认 | 说明 |
+|---|---:|---|
+| `RAG_MAX_TOP_K` | 20 | 返回条数上限 |
+| `RAG_DEFAULT_TOP_K` | 8 | 默认返回条数 |
+| `RAG_SNIPPET_CHARS` | 300 | 片段字数 |
+| `RAG_MAX_FETCH_CHARS` | 4000 | fetch 文本上限 |
+| `RAG_MAX_QUERY_CHARS` | 2000 | 查询原文上限 |
 
----
+更多配置见 [.env.example](.env.example)。
 
-## 接入一个新场景：5 步，2–4 天
+### 3.5 阈值
 
-这是判断「它算不算通用模板」的唯一标准 —— 不是配置项多不多。
-
-| 步骤 | 谁做 | 工时 | 说明 |
-|---|---|---|---|
-| **1. 语料入库** | 开发 | 半天–2 天 | 已有 JSON / 向量库直接可用；全新格式（扫描 PDF、Confluence）要写一个小适配器 |
-| **2. 元数据映射** | **你** | 半天 | 部门 / 类型 / 密级 / 日期。**纯业务决策，代码不用改** |
-| **3. 写 20–40 条真实问题** | **你** | 半天–1 天 | **最重要的一步。** 没有它，后面所有调优都是自我安慰 |
-| **4. 标定阈值** | 脚本 | 30 秒 | `python -m rag_mcp.calibrate` 自动算 |
-| **5. 验收** | 开发 | 10 分钟 | `pytest eval` 全绿才算接入成功 |
+`RAG_RELEVANCE_FLOOR`、`RAG_CONFIDENCE_HIGH`、`RAG_CONFIDENCE_MEDIUM`、`RAG_DENSE_FLOOR`
+依赖具体语料和模型，不建议手调。换语料后运行：
 
 ```bash
-# 步骤 1：入库
-python -m rag_mcp.ingest --source json      --data 你的语料.json       --out rag.db
-python -m rag_mcp.ingest --source tcm-sqlite --db 现成向量库.sqlite     --out rag.db
-
-# 旧版本索引（chunk_id 没有内容指纹）先升级；会先写 .pre-v2.bak
-python -m rag_mcp.migrate rag.db --rebuild-fts
-
-# 步骤 4：标定（会打印建议值并写出一份 env 档）
-# 档里会固定 backend/db/registry；embedding/rerank 端点与 key 仍从根 .env 继承
-python -m rag_mcp.calibrate --db rag.db --golden eval/golden_新场景.jsonl --out config/新场景.env
-
-# 步骤 5：验收
-RAG_ENV_FILE=config/新场景.env python -m pytest eval -q
+python -m rag_mcp.calibrate \
+  --db rag.db \
+  --golden eval/golden_新场景.jsonl \
+  --out config/新场景.env
 ```
 
----
+## 4. 接入一个新场景
 
-## 配置项的两种性质（重要）
+1. **入库语料**
+
+   ```bash
+   python -m rag_mcp.ingest --source json --data 你的语料.json --out rag.db
+   ```
+
+2. **更新可过滤词表**
+
+   修改 `RAG_REGISTRY_PATH` 指向的 `registry.json`，填入实际的部门、文档类型和日期字段。
+
+3. **写 golden 用例**
+
+   准备 20–40 条真实问题，放到 `eval/golden_新场景.jsonl`。
+
+4. **标定阈值**
+
+   ```bash
+   python -m rag_mcp.calibrate \
+     --db rag.db \
+     --golden eval/golden_新场景.jsonl \
+     --out config/新场景.env
+   ```
+
+5. **跑评测**
+
+   ```bash
+   RAG_ENV_FILE=config/新场景.env pytest eval -q
+   ```
+
+## 5. 测试与评测
 
 ```bash
-# ---- 第一类：安全可调，随便改，改坏只是体验差 ----
-RAG_MAX_TOP_K=20          # 返回条数上限
-RAG_SNIPPET_CHARS=300     # 片段字数
-RAG_MAX_FETCH_CHARS=4000  # 展开时的字数上限
-RAG_MAX_QUERY_CHARS=2000  # 查询原文上限，超出会截断并标记
-RAG_EMBEDDING_MODEL=...   # 向量模型
-RAG_RERANK_MODEL=...      # 重排模型
-RAG_RERANK_PROVIDER=...   # openai | dashscope | heuristic
-RAG_RETRIEVAL_MODE=auto   # auto | hybrid | lexical | dense
+# 离线单元测试
+pytest tests -q
 
-# ---- 第二类：改了必错，必须用 calibrate 重算 ----
-RAG_RELEVANCE_FLOOR=0.15  # 低于它丢弃结果
-RAG_CONFIDENCE_HIGH=0.50  # 标成 high 的门槛
-RAG_CONFIDENCE_MEDIUM=0.25
-RAG_DENSE_FLOOR=0.55      # 只被语义命中的最低余弦
+# 离线样例评测
+pytest eval -q
+
+# 代码检查
+ruff check src tests eval
+ruff format --check src tests eval
 ```
 
-**为什么第二类不能随手调**：这三个数字的来历是「无关问题最高 0.121，真实问题最低 0.197 → 所以线画在 0.15」。
-换一份语料，这组数字全变。**已实测过**：同一套阈值在样例语料上正常，在中医语料上会让真实问题全部被丢弃。
+评测用例在 `eval/`，指标和门禁由评测脚本负责。
 
-→ 所以**不要**做滑块界面让人随手拉这四个数；要做的是能自动重算它们的脚本。
+## 6. 如何贡献
 
----
+- 有明确场景或改动建议，优先先开 issue 描述背景。
+- 提交前运行：
 
-## 出问题了先跑什么
+  ```bash
+  pytest tests -q
+  ruff check src tests eval
+  ruff format --check src tests eval
+  ```
 
-| 现象 | 先执行 |
-|---|---|
-| 客户端连不上 / 一调用就断 | `.venv/bin/rag-mcp` 手动启动，看 **stderr**（日志都在这里，stdout 只走协议） |
-| 搜不到东西 | `python -m rag_mcp.doctor` 看检索模式是不是掉成了 `lexical` |
-| 结果全是 `low` / 全空 | 阈值没标定 —— 跑 `calibrate` |
-| 启动很慢 | `doctor` 看「向量缓存」是否有命中；第一次要建索引 |
-| 想确认没泄密 | `pytest eval -q`，看 `leaks==0` |
-| 想确认改好了没 | 改前改后各跑一次 `eval/run_eval.py`，对比表 |
+- 不要提交 `.env`、真实语料、`rag.db`、缓存目录或私有记录。
+- PR 尽量保持单一主题，说明改动目的、影响范围和验证方式。
 
----
+## 7. 开源协议
 
-## 凭什么说这样更好（基线对比）
-
-同一套 22 条考题，只改「走哪几路召回 / 要不要重排 / 有没有相关性下限」：
-
-| 配置 | Recall@10 | 首条正确 | nDCG@10 | 上下文成本 | **反例沉默率** |
-|---|---|---|---|---|---|
-| ① 纯向量（业界常见做法） | 100% | 100% | 0.992 | 5133 字 | **0%** |
-| ② 纯向量 + 重排 | 100% | 100% | 0.996 | 5037 字 | 0% |
-| ③ 混合召回（BM25+向量） | 100% | 100% | 0.993 | 5229 字 | 0% |
-| ④ 混合 + 重排 | 100% | 100% | 0.993 | 5203 字 | 0% |
-| **⑤ 混合 + 重排 + 相关性下限（本仓库）** | 100% | 100% | 0.993 | **3648 字** | **100%** |
-
-**这张表最重要的信息是「排名指标没有差异」** —— 因为考题期望是章节级的，
-而这份语料本身切得规整，任何像样的检索都能命中。硬造一个「提升 5%」是自欺。
-
-真实差异在另外两个轴上：
-
-- **反例沉默率 0% → 100%**：语料里没有答案的问题（「今天天气怎么样」），
-  纯向量**一定会返回 top-k** —— 它永远给不出「我不知道」。加上相关性下限后 100% 拒绝。
-- **上下文成本 -29%**：同样的正确率，少传 1485 字给模型。
-
-复现：`RAG_ENV_FILE=config/tcm.env python eval/compare_backends.py`
-
-## 三个数字（当前实测）
-
-| 场景 | Recall@10 | 首条正确 | nDCG@10 | 无关问题沉默 | 延迟 |
-|---|---|---|---|---|---|
-| 样例语料（6 篇假制度） | 100% | 96.8% | 0.98 | — | ~0.3s |
-| **中医语料（884 块）** | **100%** | **100%** | **0.996** | **100%** | 0.79s |
-
-测试：`pytest tests` 130 passed（样例语料、完全离线）；样例 eval 16 passed。真实 TCM eval 需要可用的 key/网络，结果单独记录。
-
----
-
-## 文档地图
-
-| 想知道 | 看 |
-|---|---|
-| **这是什么、怎么用** | 本文件 |
-| **对外承诺了哪些行为、怎么验收** | [MVP.md](MVP.md) |
-| **为什么这么设计、放弃了什么、代价是什么** | [DESIGN.md](DESIGN.md) |
-| 踩过哪些坑、哪些设计被实测推翻 | DESIGN.md §18「落地记录」 |
+本项目采用 [Apache License 2.0](LICENSE) 开源。
