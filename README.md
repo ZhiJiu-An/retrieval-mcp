@@ -3,6 +3,10 @@
 > **一句话**：让 AI（Claude Code / 各类 IDE 里的模型）能**问你自己的文档库**，
 > 并且只返回它有权限看的、只返回片段、还告诉你这条结果可不可信。
 
+它同时是一份**可复用的检索优化模板**：样例语料 30 秒可跑；接入新语料时主要替换
+`registry.json` / `ingest` / 后端，检索域（`service.py` / `policy.py`）不用重写。
+设计取舍见 [DESIGN.md](DESIGN.md)，对外契约与验收矩阵见 [MVP.md](MVP.md)。
+
 ---
 
 ## 30 秒理解它是什么
@@ -25,7 +29,7 @@ AI：根据《中医内科学》第四章……
 # 1) 用内置样例语料（6 篇假制度，不需要任何 key —— 用来验证接线是否通）
 .venv/bin/rag-mcp
 
-# 2) 用真实语料（《中医内科学》884 块，需要百炼 key）
+# 2) 可选：用真实语料（《中医内科学》884 块，需要可用的百炼 key/网络）
 RAG_ENV_FILE=config/tcm.env .venv/bin/rag-mcp
 
 # 出问题先跑这个，它会告诉你哪一环坏了
@@ -78,11 +82,14 @@ src/rag_mcp/
 ├── errors.py         ← 结构化错误码，让 AI 知道怎么改
 ├── registry.json     ← 可过滤字段的词表（由入库侧定义）
 ├── text.py           ← 中文分词、清洗、片段截取、注入内容标注
+├── env.py            ← 环境变量解析（唯一实现，含范围校验）
+├── http.py           ← HTTP 连接复用 + 429/5xx 重试
 ├── embedding.py      ← 向量模型（远程 API / 本地桩）
 ├── rerank.py         ← 重排（百炼 / OpenAI 兼容 / 启发式 / 关闭）
 ├── fusion.py         ← 两路结果融合（RRF）
-├── cache.py          ← 向量索引缓存（冷启动 3.5s → 0.37s）
+├── cache.py          ← 向量索引缓存（默认用户缓存目录，冷启动 3.5s → 0.37s）
 ├── ingest.py         ← 入库 CLI：把语料变成 rag.db
+├── migrate.py        ← 旧索引升级：chunk_id v2 / FTS 重建
 ├── doctor.py         ← 自检：语料 / 向量模型 / 重排模型 三段排查
 └── backends/
     ├── base.py       ← 后端只需实现 4 个方法
@@ -91,6 +98,7 @@ src/rag_mcp/
 
 eval/                 ← 评测：golden 用例 + 指标 + 安全门禁
 config/tcm.env        ← 真实的「中医语料」配置档
+config/tcm.registry.json ← 中医语料词表快照
 .env                  ← 密钥与默认配置（不进版本库）
 DESIGN.md             ← 为什么这么设计（含所有决策的理由与代价）
 MVP.md                ← 对外功能契约与验收矩阵
@@ -115,7 +123,11 @@ MVP.md                ← 对外功能契约与验收矩阵
 python -m rag_mcp.ingest --source json      --data 你的语料.json       --out rag.db
 python -m rag_mcp.ingest --source tcm-sqlite --db 现成向量库.sqlite     --out rag.db
 
+# 旧版本索引（chunk_id 没有内容指纹）先升级；会先写 .pre-v2.bak
+python -m rag_mcp.migrate rag.db --rebuild-fts
+
 # 步骤 4：标定（会打印建议值并写出一份 env 档）
+# 档里会固定 backend/db/registry；embedding/rerank 端点与 key 仍从根 .env 继承
 python -m rag_mcp.calibrate --db rag.db --golden eval/golden_新场景.jsonl --out config/新场景.env
 
 # 步骤 5：验收
@@ -131,8 +143,10 @@ RAG_ENV_FILE=config/新场景.env python -m pytest eval -q
 RAG_MAX_TOP_K=20          # 返回条数上限
 RAG_SNIPPET_CHARS=300     # 片段字数
 RAG_MAX_FETCH_CHARS=4000  # 展开时的字数上限
+RAG_MAX_QUERY_CHARS=2000  # 查询原文上限，超出会截断并标记
 RAG_EMBEDDING_MODEL=...   # 向量模型
 RAG_RERANK_MODEL=...      # 重排模型
+RAG_RERANK_PROVIDER=...   # openai | dashscope | heuristic
 RAG_RETRIEVAL_MODE=auto   # auto | hybrid | lexical | dense
 
 # ---- 第二类：改了必错，必须用 calibrate 重算 ----
@@ -190,9 +204,9 @@ RAG_DENSE_FLOOR=0.55      # 只被语义命中的最低余弦
 | 场景 | Recall@10 | 首条正确 | nDCG@10 | 无关问题沉默 | 延迟 |
 |---|---|---|---|---|---|
 | 样例语料（6 篇假制度） | 100% | 96.8% | 0.98 | — | ~0.3s |
-| **中医语料（884 块）** | **100%** | **100%** | **0.993** | **100%** | 0.79s |
+| **中医语料（884 块）** | **100%** | **100%** | **0.996** | **100%** | 0.79s |
 
-测试：`84 passed`（样例语料）+ 22 条真实语料用例全绿。
+测试：`pytest tests` 130 passed（样例语料、完全离线）；样例 eval 16 passed。真实 TCM eval 需要可用的 key/网络，结果单独记录。
 
 ---
 
